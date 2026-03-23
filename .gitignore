@@ -134,3 +134,14 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+ref/
+# MkDocs
+site/
+
+# Original Korean docs (merged into docs/)
+.readme/
+CLAUDE.md
+
+# Large data files
+data/

@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>QBTiles Web Client Example</title>
+    <style>
+        body { font-family: monospace; margin: 2rem; background: #1a1a2e; color: #e0e0e0; }
+        h1 { color: #8be9fd; }
+        h2 { color: #bd93f9; margin-top: 2rem; }
+        .log { background: #0d0d1a; padding: 1rem; border-radius: 4px; margin: 0.5rem 0; border-left: 3px solid #444; }
+        .success { border-left-color: #50fa7b; }
+        .info { border-left-color: #8be9fd; }
+        .warn { border-left-color: #f1fa8c; }
+        .code { background: #282a36; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+        table { border-collapse: collapse; margin: 1rem 0; }
+        th, td { border: 1px solid #444; padding: 0.3rem 0.8rem; text-align: right; }
+        th { background: #282a36; color: #8be9fd; }
+        #output { margin-top: 1rem; }
+        button { background: #6272a4; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin: 0.5rem 0.5rem 0.5rem 0; }
+        button:hover { background: #7283b5; }
+        input { background: #282a36; color: #e0e0e0; border: 1px solid #444; padding: 0.5rem; border-radius: 4px; margin: 0.2rem; width: 60px; }
+    </style>
+</head>
+<body>
+    <h1>QBTiles Web Client Example</h1>
+    <p>Python 예제(01_xyz_tiles.py)에서 생성한 index.gz를 브라우저에서 읽는 데모입니다.</p>
+
+    <h2>1. 인덱스 로드</h2>
+    <p>
+        <button onclick="loadFromFile()">index.gz 파일 선택</button>
+        <button onclick="loadBuiltinDemo()">내장 데모 실행</button>
+    </p>
+    <input type="file" id="fileInput" style="display:none" accept=".gz">
+
+    <h2>2. 타일 조회</h2>
+    <p>
+        z: <input id="qz" type="number" value="3" min="0" max="20">
+        x: <input id="qx" type="number" value="6" min="0">
+        y: <input id="qy" type="number" value="3" min="0">
+        <button onclick="lookupTile()">조회</button>
+    </p>
+
+    <div id="output"></div>
+
+    <h2>3. 소스 코드 (인라인)</h2>
+    <p>아래는 <code>src/typescript/qbtiles.ts</code>의 핵심 로직을 브라우저에서 바로 실행할 수 있도록 인라인한 것입니다.</p>
+
+<script>
+// ============================================================
+// QBTiles 클라이언트 코드 (src/typescript/qbtiles.ts 인라인)
+// ============================================================
+
+function expandQuadkeyInt64(parent, bitmask) {
+    const children = [];
+    for (let i = 0; i < 4; i++) {
+        if (bitmask & (1 << (3 - i))) {
+            const child = (parent << 2n) | BigInt(i);
+            children.push(child);
+        }
+    }
+    return children;
+}
+
+function quadkeyInt64ToZXY(qint64) {
+    let x = 0, y = 0, z = 0;
+    let foundPrefix = false;
+    for (let shift = 62n; shift >= 0n; shift -= 2n) {
+        const digit = (qint64 >> shift) & 0b11n;
+        if (!foundPrefix) {
+            if (digit === 0b11n) foundPrefix = true;
+            continue;
+        }
+        x = (x << 1) | Number(digit & 1n);
+        y = (y << 1) | Number((digit >> 1n) & 1n);
+        z += 1;
+    }
+    return { z, x, y };
+}
+
+function tileToQuadkeyInt64(z, x, y) {
+    let qk = 3n;
+    for (let i = z - 1; i >= 0; i--) {
+        const digit = ((BigInt(y >> i) & 1n) << 1n) | (BigInt(x >> i) & 1n);
+        qk = (qk << 2n) | digit;
+    }
+    return qk;
+}
+
+function readVarint(view, offsetRef) {
+    let result = 0, shift = 0, byte;
+    let offset = offsetRef.offset;
+    while (true) {
+        byte = view.getUint8(offset++);
+        result |= (byte & 0x7f) << shift;
+        if (!(byte & 0x80)) break;
+        shift += 7;
+    }
+    offsetRef.offset = offset;
+    return result;
+}
+
+function deserializeQuadtreeIndex(buffer) {
+    const view = new DataView(buffer);
+    const offsetRef = { offset: 0 };
+
+    // 헤더: 비트마스크 바이트 길이
+    const bitmaskLen = view.getUint32(offsetRef.offset);
+    offsetRef.offset += 4;
+
+    // 비트마스크 읽기 (4비트 × 2 팩킹)
+    const bitmasks = [];
+    for (let i = 0; i < bitmaskLen; i++) {
+        const byte = view.getUint8(offsetRef.offset++);
+        bitmasks.push(byte >> 4);
+        bitmasks.push(byte & 0x0f);
+    }
+    if (bitmasks[bitmasks.length - 1] === 0) bitmasks.pop();
+
+    // BFS 확장으로 쿼드키 복원
+    const quadkeys = [3n];
+    let queue = [3n];
+    let i = 0;
+    while (i < bitmasks.length) {
+        const nextQueue = [];
+        for (const parent of queue) {
+            if (i >= bitmasks.length) break;
+            const children = expandQuadkeyInt64(parent, bitmasks[i]);
+            quadkeys.push(...children);
+            nextQueue.push(...children);
+            i += 1;
+        }
+        queue = nextQueue;
+    }
+
+    // 열 방향 varint 읽기
+    const run_lengths = [], lengths = [];
+    for (let i = 0; i < quadkeys.length; i++) run_lengths.push(readVarint(view, offsetRef));
+    for (let i = 0; i < quadkeys.length; i++) lengths.push(readVarint(view, offsetRef));
+
+    const offsets = [];
+    for (let i = 0; i < quadkeys.length; i++) {
+        const encoded = readVarint(view, offsetRef);
+        if (i > 0 && encoded === 0) {
+            offsets.push(offsets[i - 1] + lengths[i - 1]);
+        } else {
+            offsets.push(encoded - 1);
+        }
+    }
+
+    // 엔트리 맵 구성
+    const entryMap = new Map();
+    let vertex_offset = 0;
+    for (let i = 0; i < quadkeys.length; i++) {
+        if (lengths[i] === 0) continue;
+        const qkInt = quadkeys[i];
+        const { z, x, y } = quadkeyInt64ToZXY(qkInt);
+        entryMap.set(qkInt, {
+            quadkey_int: qkInt,
+            z, x, y,
+            offset: offsets[i],
+            length: lengths[i],
+            vertex_offset,
+            vertex_length: run_lengths[i],
+        });
+        vertex_offset += run_lengths[i];
+    }
+
+    return entryMap;
+}
+
+// ============================================================
+// UI 로직
+// ============================================================
+
+let currentIndex = null;
+
+function log(msg, cls = '') {
+    const div = document.createElement('div');
+    div.className = 'log ' + cls;
+    div.textContent = msg;
+    document.getElementById('output').appendChild(div);
+}
+
+function clearOutput() {
+    document.getElementById('output').innerHTML = '';
+}
+
+function showEntryTable(entryMap) {
+    const entries = Array.from(entryMap.values()).sort((a, b) => {
+        if (a.z !== b.z) return a.z - b.z;
+        if (a.x !== b.x) return a.x - b.x;
+        return a.y - b.y;
+    });
+
+    let html = '<table><tr><th>z</th><th>x</th><th>y</th><th>quadkey</th><th>offset</th><th>length</th></tr>';
+    for (const e of entries) {
+        html += `<tr><td>${e.z}</td><td>${e.x}</td><td>${e.y}</td><td>${e.quadkey_int}</td><td>${e.offset}</td><td>${e.length}</td></tr>`;
+    }
+    html += '</table>';
+
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    document.getElementById('output').appendChild(div);
+}
+
+// index.gz 파일 로드
+function loadFromFile() {
+    document.getElementById('fileInput').click();
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    clearOutput();
+    log(`파일 로드 중: ${file.name} (${file.size} bytes)`, 'info');
+
+    const compressed = await file.arrayBuffer();
+
+    // gzip 해제 (브라우저 DecompressionStream 사용)
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    writer.write(new Uint8Array(compressed));
+    writer.close();
+
+    const reader = ds.readable.getReader();
+    const chunks = [];
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+    }
+    const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+    const decompressed = new Uint8Array(totalLen);
+    let pos = 0;
+    for (const chunk of chunks) {
+        decompressed.set(chunk, pos);
+        pos += chunk.length;
+    }
+
+    log(`압축 해제: ${compressed.byteLength} → ${decompressed.length} bytes`, 'info');
+
+    // 역직렬화
+    const t0 = performance.now();
+    currentIndex = deserializeQuadtreeIndex(decompressed.buffer);
+    const t1 = performance.now();
+
+    log(`역직렬화 완료: ${currentIndex.size}개 엔트리, ${(t1 - t0).toFixed(1)}ms`, 'success');
+    showEntryTable(currentIndex);
+});
+
+// 내장 데모: 가상 인덱스를 메모리에서 생성
+function loadBuiltinDemo() {
+    clearOutput();
+    log('내장 데모: Python 빌더 없이 직접 바이너리를 구성하는 예시', 'info');
+
+    // 간단한 인덱스를 수동으로 구성 (줌3 타일 4개)
+    // 이 바이너리는 01_xyz_tiles.py가 생성하는 것과 동일한 구조
+    const tiles = [
+        { z: 3, x: 6, y: 3, offset: 0, length: 1024 },
+        { z: 3, x: 7, y: 3, offset: 3072, length: 1536 },
+        { z: 3, x: 6, y: 4, offset: 1024, length: 2048 },
+        { z: 3, x: 7, y: 4, offset: 4608, length: 1024 },
+    ];
+
+    // quadkey_info 구성 및 정렬
+    const qkInfos = tiles.map(t => ({
+        ...t,
+        qk: tileToQuadkeyInt64(t.z, t.x, t.y)
+    })).sort((a, b) => (a.qk < b.qk ? -1 : a.qk > b.qk ? 1 : 0));
+
+    log(`타일 ${qkInfos.length}개의 quadkey 계산 완료`, 'info');
+    for (const t of qkInfos) {
+        const { z, x, y } = quadkeyInt64ToZXY(t.qk);
+        log(`  tile(${t.z}/${t.x}/${t.y}) → qk=${t.qk} → decode=(${z}/${x}/${y})`, 'info');
+    }
+
+    // 수동으로 바이너리 인덱스 구성
+    // 이 부분은 Python 빌더가 하는 일을 JavaScript로 시연한 것
+    //
+    // 쿼드트리 구조 (줌3, quadkey "132","133","310","311"):
+    //   루트 → 자식 1, 3 존재 → bitmask 0101 = 5
+    //   자식 1 → 자식 3 존재 → bitmask 0001 = 1
+    //   자식 3 → 자식 1 존재 → bitmask 0100 = 4
+    //   자식 13 → 자식 2, 3 존재 → bitmask 0011 = 3
+    //   자식 31 → 자식 0, 1 존재 → bitmask 1100 = 12
+    //   리프 4개: 132, 133, 310, 311 (모두 bitmask 0)
+
+    // bitmask BFS: [5, 1, 4, 3, 12, 0, 0, 0, 0]
+    // → 마지막 레벨 전부 0이면 중단, 실제로는 [5, 1, 4, 3, 12]
+    const bitmasks = [5, 1, 4, 3, 12];
+
+    // 바이트 팩킹: (5<<4|1), (4<<4|3), (12<<4|0)
+    const bitmaskBytes = new Uint8Array([(5 << 4) | 1, (4 << 4) | 3, (12 << 4) | 0]);
+
+    // varint 인코딩 헬퍼
+    function writeVarint(arr, val) {
+        while (true) {
+            let byte = val & 0x7f;
+            val >>>= 7;
+            if (val) { arr.push(byte | 0x80); } else { arr.push(byte); break; }
+        }
+    }
+
+    // 노드 순서 (BFS): 루트, 자식1, 자식3, 자식13, 자식31, 리프132, 리프133, 리프310, 리프311
+    // 엔트리 값 (순서에 맞게):
+    //  노드     run_length  length  offset
+    //  루트     1           0       0      (내부 노드)
+    //  1        1           0       0      (내부 노드)
+    //  3        1           0       0      (내부 노드)
+    //  13       1           0       0      (내부 노드)
+    //  31       1           0       0      (내부 노드)
+    //  132      1           1024    0      (리프)
+    //  133      1           1536    3072   (리프)
+    //  310      1           2048    1024   (리프)
+    //  311      1           1024    4608   (리프)
+
+    const run_lengths = [1, 1, 1, 1, 1, 1, 1, 1, 1];
+    const lengths =     [0, 0, 0, 0, 0, 1024, 1536, 2048, 1024];
+    const offsets_raw = [0, 0, 0, 0, 0, 0, 3072, 1024, 4608];
+
+    const varintBuf = [];
+    for (const v of run_lengths) writeVarint(varintBuf, v);
+    for (const v of lengths) writeVarint(varintBuf, v);
+    for (let i = 0; i < offsets_raw.length; i++) {
+        if (i > 0 && offsets_raw[i] === offsets_raw[i - 1] + lengths[i - 1]) {
+            writeVarint(varintBuf, 0);
+        } else {
+            writeVarint(varintBuf, offsets_raw[i] + 1);
+        }
+    }
+
+    // 전체 버퍼 조립
+    const totalSize = 4 + bitmaskBytes.length + varintBuf.length;
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+
+    // 헤더: 비트마스크 바이트 길이
+    view.setUint32(0, bitmaskBytes.length);
+
+    // 비트마스크
+    const u8 = new Uint8Array(buffer);
+    u8.set(bitmaskBytes, 4);
+
+    // varint 섹션
+    u8.set(new Uint8Array(varintBuf), 4 + bitmaskBytes.length);
+
+    log(`바이너리 인덱스 수동 구성: ${totalSize} bytes`, 'info');
+
+    // 역직렬화
+    const t0 = performance.now();
+    currentIndex = deserializeQuadtreeIndex(buffer);
+    const t1 = performance.now();
+
+    log(`역직렬화 완료: ${currentIndex.size}개 엔트리, ${(t1 - t0).toFixed(2)}ms`, 'success');
+
+    // 검증
+    let allOk = true;
+    for (const t of tiles) {
+        const qk = tileToQuadkeyInt64(t.z, t.x, t.y);
+        const entry = currentIndex.get(qk);
+        if (!entry) {
+            log(`  FAIL: tile(${t.z}/${t.x}/${t.y}) not found`, 'warn');
+            allOk = false;
+        } else if (entry.offset !== t.offset || entry.length !== t.length) {
+            log(`  FAIL: tile(${t.z}/${t.x}/${t.y}) mismatch`, 'warn');
+            allOk = false;
+        }
+    }
+    if (allOk) log('모든 타일 검증 통과!', 'success');
+
+    showEntryTable(currentIndex);
+}
+
+// 타일 조회
+function lookupTile() {
+    if (!currentIndex) {
+        log('먼저 인덱스를 로드하세요', 'warn');
+        return;
+    }
+
+    const z = parseInt(document.getElementById('qz').value);
+    const x = parseInt(document.getElementById('qx').value);
+    const y = parseInt(document.getElementById('qy').value);
+
+    const qk = tileToQuadkeyInt64(z, x, y);
+    const entry = currentIndex.get(qk);
+
+    if (entry) {
+        log(`tile(${z}/${x}/${y}) → quadkey=${qk}`, 'success');
+        log(`  offset: ${entry.offset}`, 'info');
+        log(`  length: ${entry.length}`, 'info');
+        log(`  Range: bytes=${entry.offset}-${entry.offset + entry.length - 1}`, 'info');
+        log(`  vertex_offset: ${entry.vertex_offset}, vertex_length: ${entry.vertex_length}`, 'info');
+    } else {
+        log(`tile(${z}/${x}/${y}) → quadkey=${qk} — 인덱스에 없음`, 'warn');
+    }
+}
+</script>
+
+</body>
+</html>

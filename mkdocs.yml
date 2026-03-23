@@ -1,0 +1,69 @@
+site_name: QBTiles
+site_url: https://vuski.github.io/qbtiles/
+repo_url: https://github.com/vuski/qbtiles
+repo_name: vuski/qbtiles
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: ko
+          name: 한국어
+          build: true
+  - mkdocs-jupyter:
+      include: ["*.ipynb"]
+      execute: false
+      allow_errors: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - admonition
+  - tables
+  - attr_list
+  - md_in_html
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Quadkey Encoding: quadkey-encoding.md
+  - Format Spec: format-spec.md
+  - Comparison: comparison.md
+  - Benchmark: benchmark-results.md
+  - Examples:
+    - XYZ Tiles: examples/01_xyz_tiles.md
+    - Custom CRS: examples/02_custom_crs.md
+    - Web Client: examples/03_web_client.md
+    - Compare PMTiles: examples/05_compare_real_pmtiles.ipynb
