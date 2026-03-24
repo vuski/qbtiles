@@ -1,0 +1,28 @@
+{
+  "name": "qbtiles-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19",
+    "maplibre-gl": "^5",
+    "react-map-gl": "^8",
+    "@deck.gl/core": "^9.2",
+    "@deck.gl/layers": "^9.2",
+    "@deck.gl/mapbox": "^9.2",
+    "proj4": "^2"
+  },
+  "devDependencies": {
+    "vite": "^6",
+    "@vitejs/plugin-react": "^4",
+    "typescript": "^5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/proj4": "^2"
+  }
+}

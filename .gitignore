@@ -150,3 +150,10 @@ data/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Demo
+demo-src/node_modules/
+demo-src/tiles/*.data
+demo-src/tiles/*.gz
+demo-src/population/*.gz
+docs/demo/

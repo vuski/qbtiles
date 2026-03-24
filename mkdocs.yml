@@ -58,7 +58,7 @@ nav:
     - XYZ Tiles: examples/01_xyz_tiles.ipynb
     - Bitmask as Data Container: examples/02_bitmask_as_data_container.ipynb
     - Web Client: examples/03_web_client.md
-    - Compare PMTiles: examples/05_compare_real_pmtiles.md
+    - Compare PMTiles: examples/05_compare_real_pmtiles.ipynb
   - 한국어:
     - 홈: ko/index.md
     - 아키텍처: ko/architecture.md

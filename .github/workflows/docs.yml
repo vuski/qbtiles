@@ -26,6 +26,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build demo pages
+        run: |
+          cd demo-src
+          npm ci
+          npm run build
+          cp ../examples/korea_tiles.idx.gz ../docs/demo/tiles/
+          cp ../examples/korea_tiles.data ../docs/demo/tiles/
+          cp ../examples/korea_pop_100m.gz ../docs/demo/population/
+
       - run: pip install mkdocs-material "mkdocs-jupyter==0.25.1"
 
       - run: mkdocs build
