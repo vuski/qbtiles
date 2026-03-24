@@ -28,18 +28,8 @@ theme:
 
 plugins:
   - search
-  - i18n:
-      docs_structure: suffix
-      languages:
-        - locale: en
-          name: English
-          default: true
-          build: true
-        - locale: ko
-          name: 한국어
-          build: true
   - mkdocs-jupyter:
-      include: ["*.ipynb"]
+      include_source: true
       execute: false
       allow_errors: true
 
@@ -56,14 +46,23 @@ markdown_extensions:
   - md_in_html
 
 nav:
-  - Home: index.md
-  - Architecture: architecture.md
-  - Quadkey Encoding: quadkey-encoding.md
-  - Format Spec: format-spec.md
-  - Comparison: comparison.md
-  - Benchmark: benchmark-results.md
+  - Overview: index.md
+  - Specification:
+    - Architecture: architecture.md
+    - Quadkey Encoding: quadkey-encoding.md
+    - Format Spec: format-spec.md
+    - Comparison: comparison.md
+    - Benchmark: benchmark-results.md
+  - Beyond Tile Indexing: future-directions.md
   - Examples:
-    - XYZ Tiles: examples/01_xyz_tiles.md
-    - Custom CRS: examples/02_custom_crs.md
+    - XYZ Tiles: examples/01_xyz_tiles.ipynb
+    - Bitmask as Data Container: examples/02_bitmask_as_data_container.ipynb
     - Web Client: examples/03_web_client.md
-    - Compare PMTiles: examples/05_compare_real_pmtiles.ipynb
+    - Compare PMTiles: examples/05_compare_real_pmtiles.md
+  - 한국어:
+    - 홈: ko/index.md
+    - 아키텍처: ko/architecture.md
+    - 쿼드키 인코딩: ko/quadkey-encoding.md
+    - 포맷 스펙: ko/format-spec.md
+    - 비교: ko/comparison.md
+    - 벤치마크: ko/benchmark-results.md

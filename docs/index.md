@@ -2,7 +2,7 @@
 
 **QBTiles** (Quadkey Bitmask Tiles) is a cloud-optimized tile archive index format.
 
-It encodes tile existence as **4-bit bitmasks** in BFS order — no tile IDs are stored. Quadkeys are reconstructed from the tree structure itself, resulting in smaller indices compared to PMTiles.
+It encodes tile existence as **4-bit bitmasks** in BFS order. The position of each entry is implied by the tree structure, **reducing ID storage cost to zero** — quadkeys are reconstructed from the bitmasks alone.
 
 ## Why QBTiles?
 

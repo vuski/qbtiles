@@ -461,3 +461,179 @@ def serialize_directory(entries):
             write_varint(b_io, e.offset + 1)
 
     return gzip.compress(b_io.getvalue())
+
+
+# ============================================================
+# High-level API
+# ============================================================
+
+class Entry:
+    """PMTiles 호환 엔트리 (크기 비교용)"""
+    __slots__ = ('tile_id', 'offset', 'length', 'run_length')
+    def __init__(self, tile_id, offset, length, run_length):
+        self.tile_id = tile_id
+        self.offset = offset
+        self.length = length
+        self.run_length = run_length
+
+
+def index_tile_folder(folder, ext=".png"):
+    """Scan a z/x/y tile folder and build a QBTiles index.
+
+    Args:
+        folder: Path to tile folder with z/x/y.{ext} structure.
+        ext: Tile file extension (default: ".png").
+
+    Returns:
+        List of (quadkey_int64, filepath, offset, length, run_length) tuples,
+        sorted by quadkey with offsets calculated for concatenation.
+    """
+    tiles = []
+    for root, dirs, files in os.walk(folder):
+        for f in files:
+            if not f.endswith(ext):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), folder)
+            parts = rel.replace("\\", "/").split("/")
+            if len(parts) != 3:
+                continue
+            z, x = int(parts[0]), int(parts[1])
+            y = int(parts[2].replace(ext, ""))
+            filepath = os.path.join(root, f)
+            qk = tile_to_quadkey_int64(z, x, y)
+            length = os.path.getsize(filepath)
+            tiles.append((qk, filepath, 0, length, 1))
+
+    tiles.sort(key=lambda t: t[0])
+
+    # Recalculate offsets for sequential concatenation
+    offset = 0
+    result = []
+    for qk, filepath, _, length, run_length in tiles:
+        result.append((qk, filepath, offset, length, run_length))
+        offset += length
+
+    return result
+
+
+def build_archive(folder, index_path, data_path, ext=".png"):
+    """Build a QBTiles archive from a z/x/y tile folder.
+
+    Creates two files:
+    - index_path: gzip-compressed bitmask index (.idx.gz)
+    - data_path: concatenated tile data (.data)
+
+    Args:
+        folder: Path to tile folder with z/x/y.{ext} structure.
+        index_path: Output path for the index file.
+        data_path: Output path for the data file.
+        ext: Tile file extension (default: ".png").
+
+    Returns:
+        List of index entries (quadkey_int64, filepath, offset, length, run_length).
+    """
+    entries = index_tile_folder(folder, ext)
+
+    # Build and serialize index
+    root = build_quadtree(entries)
+    write_tree_bitmask_to_single_file(root, index_path)
+
+    # Concatenate tile data in quadkey order
+    with open(data_path, "wb") as out:
+        for qk, filepath, offset, length, run_length in entries:
+            with open(filepath, "rb") as f:
+                out.write(f.read())
+
+    return entries
+
+
+def load_index(index_path):
+    """Load a QBTiles index and return a lookup dict.
+
+    Args:
+        index_path: Path to the .idx.gz index file.
+
+    Returns:
+        dict mapping quadkey_int64 -> {quadkey_int, z, x, y, offset, length, ...}
+    """
+    entries = deserialize_quadtree_index(index_path)
+    return {e['quadkey_int']: e for e in entries}
+
+
+def get_tile(data_path, index, z, x, y):
+    """Retrieve a single tile's data from the archive.
+
+    Args:
+        data_path: Path to the .data file.
+        index: Lookup dict from load_index().
+        z, x, y: Tile coordinates.
+
+    Returns:
+        bytes of the tile data, or None if not found.
+    """
+    qk = tile_to_quadkey_int64(z, x, y)
+    entry = index.get(qk)
+    if entry is None:
+        return None
+    with open(data_path, "rb") as f:
+        f.seek(entry['offset'])
+        return f.read(entry['length'])
+
+
+# ============================================================
+# Custom CRS Support
+# ============================================================
+
+def encode_custom_quadkey(x, y, zoom, origin_x, origin_y, extent):
+    """Encode a coordinate in a custom CRS to a quadkey int64.
+
+    Args:
+        x, y: Coordinate in the custom CRS.
+        zoom: Zoom level.
+        origin_x, origin_y: Grid origin (lower-left).
+        extent: Grid extent (square).
+
+    Returns:
+        Quadkey as int64 with 0b11 prefix.
+    """
+    rel_x = x - origin_x
+    rel_y = y - origin_y
+
+    if not (0 <= rel_x < extent and 0 <= rel_y < extent):
+        raise ValueError(f"Point ({x}, {y}) is out of grid bounds")
+
+    tile_size = extent / (2 ** zoom)
+    tile_x = int(rel_x // tile_size)
+    tile_y = int(rel_y // tile_size)
+
+    quadkey_int64 = 3  # 0b11 prefix
+    for i in reversed(range(zoom)):
+        digit = ((tile_y >> i) & 1) << 1 | ((tile_x >> i) & 1)
+        quadkey_int64 = (quadkey_int64 << 2) | digit
+    return quadkey_int64
+
+
+def decode_custom_quadkey(qk_int64, zoom, origin_x, origin_y, extent):
+    """Decode a quadkey int64 back to the center coordinate in a custom CRS.
+
+    Args:
+        qk_int64: Quadkey as int64 with 0b11 prefix.
+        zoom: Zoom level.
+        origin_x, origin_y: Grid origin (lower-left).
+        extent: Grid extent (square).
+
+    Returns:
+        (x_center, y_center) tuple.
+    """
+    tile_x = 0
+    tile_y = 0
+    for i in range(zoom):
+        digit = (qk_int64 >> (2 * (zoom - i - 1))) & 3
+        tile_x = (tile_x << 1) | (digit & 1)
+        tile_y = (tile_y << 1) | ((digit >> 1) & 1)
+
+    tile_size = extent / (2 ** zoom)
+    x_center = origin_x + tile_x * tile_size + tile_size / 2
+    y_center = origin_y + tile_y * tile_size + tile_size / 2
+
+    return int(x_center), int(y_center)

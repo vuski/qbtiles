@@ -12,7 +12,7 @@ As a side effect, the quadtree bitmask encoding turned out to produce **smaller 
 
 ## How It Works
 
-Map tiles are inherently a quadtree (zoom level = tree depth). QBTiles encodes **tile existence as 4-bit bitmasks** in BFS order. No tile IDs are stored — quadkeys are reconstructed from the tree structure itself.
+Map tiles are inherently a quadtree (zoom level = tree depth). QBTiles encodes **tile existence as 4-bit bitmasks** in BFS order. The position of each entry is implied by the tree structure, **reducing ID storage cost to zero** — quadkeys are reconstructed from the bitmasks alone.
 
 ```
 Level 1:  [0100]          → only child 1 exists
@@ -81,6 +81,22 @@ Supports zoom levels 0–31 within a 64-bit integer.
 
 Details: [quadkey-encoding.md](docs/quadkey-encoding.md)
 
+## Bitmask as a Data Container
+
+Beyond tile indexing, the bitmask structure can serve as a **spatial data compression format**. Instead of storing tile offsets, values (e.g., population counts) are stored directly at leaf nodes. The bitmask implicitly encodes *where* each value belongs — no coordinate or grid ID storage needed.
+
+**Example: Korea 100m population grid (931,495 cells × 3 values, 1.4% grid occupancy)**
+
+| Format | Size | vs QBTiles |
+|---|---|---|
+| GPKG | 93.0 MB | 55x |
+| GPKG + zip | 19.3 MB | 11x |
+| GeoTIFF (deflate) | 4.5 MB | 2.7x |
+| Parquet + zip | 3.6 MB | 2.1x |
+| **QBTiles bitmask** | **1.6 MB** | **1.0x** |
+
+The bitmask eliminates grid IDs entirely — position is encoded by the tree structure itself. This makes it particularly effective for irregularly distributed spatial data (e.g., populated areas with large empty regions).
+
 ## Related Work
 
 QBTiles combines existing techniques — none of the individual methods are new:
@@ -126,14 +142,13 @@ const entry = entryMap.get(qk);
 QBTiles works with any coordinate system, not just web map tiles:
 
 ```python
-from examples.fit_grid import fit_grid, encode_quadkey
+import qbtiles as qbt
 
-origin_x, origin_y, extent, tile_size = fit_grid(
-    min_x=120000, min_y=220000,
-    max_x=180000, max_y=280000,
-    zoom=10
-)
-qk = encode_quadkey(x, y, zoom, origin_x, origin_y, extent)
+# EPSG:5179, 100m grid → zoom 13 (819200 / 2^13 = 100)
+origin_x, origin_y, extent = 700000, 600000, 819200
+
+qk = qbt.encode_custom_quadkey(x, y, zoom=13, origin_x=origin_x, origin_y=origin_y, extent=extent)
+x, y = qbt.decode_custom_quadkey(qk, zoom=13, origin_x=origin_x, origin_y=origin_y, extent=extent)
 ```
 
 ## Examples

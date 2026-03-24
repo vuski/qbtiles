@@ -51,6 +51,28 @@ Both formats sort entries by their respective key (tile_id for PMTiles, quadkey 
 - gzip narrows the gap because PMTiles' delta patterns also compress well
 - QBTiles is larger in: building (+2.3%), osm_z0-z10 (+5.5%) — mixed zoom levels or spatially sparse tiles
 
+## Spatial Grid Data Compression
+
+When used as a data container (not a tile index), the bitmask structure eliminates grid IDs entirely — position is implied by the tree structure. Tested with South Korea's 100m population grid (931,495 cells × 3 values: total, male, female).
+
+| Format | Size | Ratio |
+|---|---|---|
+| GPKG | 93.0 MB | 55x |
+| GPKG + zip | 19.3 MB | 11x |
+| GeoTIFF (LZW) | 7.5 MB | 4.5x |
+| Parquet | 6.2 MB | 3.7x |
+| GeoTIFF (deflate) | 4.5 MB | 2.7x |
+| GeoTIFF (deflate) + zip | 4.1 MB | 2.4x |
+| Parquet + zip | 3.6 MB | 2.1x |
+| **QBTiles bitmask (gzip)** | **1.6 MB** | **1.0x** |
+
+- Grid occupancy: 1.4% (931K out of 67M possible cells) — highly irregular
+- GeoTIFF stores the full 8192×8192 raster with NoData; compression helps but cannot match skipping empty cells entirely
+- Parquet stores grid IDs explicitly; even compressed, ID overhead remains
+- QBTiles stores no IDs — the bitmask itself encodes which cells exist
+
+See [Example: Bitmask as a Data Container](examples/02_bitmask_as_data_container.ipynb) for the full workflow.
+
 ## Conditions
 
 - PMTiles: sorted by tile_id, `serialize_directory()` (varint delta encoding, gzip)

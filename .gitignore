@@ -145,3 +145,8 @@ CLAUDE.md
 
 # Large data files
 data/
+.claude/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
