@@ -10,7 +10,8 @@ When using PMTiles with time-series tile data sharing the same spatial structure
 
 ## Key Features
 
-- **Smaller index**: 5–48% reduction vs PMTiles depending on dataset density
+- **Smaller file, finer access**: 46% smaller than GeoTIFF with **per-cell** Range Request (vs 512×512 blocks). [See comparison →](future-directions.md)
+- **Zero cost for empty space**: Bitmask tree stores only existing cells — no wasted bytes on nodata
 - **Separated index**: Reuse one index across multiple data files with the same tile structure
 - **Simple encoding**: Quadtree bitmask BFS — no Hilbert curve computation needed
 - **Cloud-native**: HTTP Range Request for serverless tile serving (S3, R2, etc.)
