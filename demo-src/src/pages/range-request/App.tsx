@@ -9,8 +9,7 @@ import type { QBTCellData } from "qbtiles";
 import type { COGCellData } from "../../lib/cog-query";
 import { TrafficChart } from "./TrafficChart";
 
-const BITMASK_URL = "./global_pop_bitmask.gz";
-const VALUES_URL = "https://assets.vw-lab.uk/qbtiles/global_pop_values.bin";
+const QBT_URL = "https://assets.vw-lab.uk/qbtiles/global_pop.qbt";
 const COG_URL = "https://assets.vw-lab.uk/worldpop/world_pop_2025.tif";
 
 // Seeded random chunk color
@@ -56,7 +55,7 @@ function App() {
   });
   const [bbox, setBbox] = useState<BBox>([126.8, 37.4, 127.2, 37.7]);
 
-  const qbt = useQBTilesQuery(BITMASK_URL, VALUES_URL);
+  const qbt = useQBTilesQuery(QBT_URL);
   const cog = useCOGQuery(COG_URL);
 
   // ---- Cumulative traffic chart (X = user click count) ----

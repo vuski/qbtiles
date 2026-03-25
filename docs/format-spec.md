@@ -30,7 +30,8 @@ Offset  Size  Type      Field              Description
 4       2     uint16    version            1 (current)
 6       2     uint16    header_size        Total header bytes (≥128). Bitmask starts at this offset.
 8       4     uint32    flags              Bit 0: 0=variable, 1=fixed entry mode
-                                           Bits 1–31: reserved (must be 0)
+                                           Bit 1: 0=row layout, 1=columnar layout
+                                           Bits 2–31: reserved (must be 0)
 12      1     uint8     zoom               Quadtree depth (leaf zoom level)
 13      1     uint8     reserved           Must be 0
 14      2     uint16    crs                EPSG code. 0 = custom CRS (use origin/extent).
@@ -46,7 +47,9 @@ Offset  Size  Type      Field              Description
 80      8     uint64    metadata_length    Byte length of JSON metadata
 88      4     uint32    entry_size         Bytes per entry. 0 = variable mode.
 92      2     uint16    field_count        Number of fields in schema (fixed mode)
-94      34    bytes     reserved           Must be 0. Future use.
+94      32    bytes     index_hash         SHA-256 of bitmask section (header_size to values_offset).
+                                           All zeros if not computed.
+126     2     bytes     reserved           Must be 0. Future use.
 ──────  ────
 128            MINIMUM HEADER SIZE
 ```
@@ -79,8 +82,11 @@ Field descriptors are packed sequentially with no padding between them.
 | 7    | float64 | 8      |
 | 8    | int64   | 8      |
 | 9    | uint64  | 8      |
+| 10   | varint  | variable | Unsigned LEB128. Columnar mode only. |
 
-`entry_size` must equal the sum of all field sizes. Parsers should validate this.
+**Row layout** (flags bit 1 = 0): `entry_size` must equal the sum of all field sizes. Only fixed-size types (1–9) allowed. Parsers should validate this.
+
+**Columnar layout** (flags bit 1 = 1): `entry_size` is 0. Variable-length types (varint) are allowed. The `offset` field in each descriptor is ignored (columns are stored sequentially).
 
 ### Header Extensibility
 
@@ -157,6 +163,8 @@ The number of leaves encountered in BFS order determines the leaf index (0-based
 
 ## 4. Values Section (Fixed-Entry Mode)
 
+### 4a. Row Layout (flags bit 1 = 0)
+
 When `entry_size > 0`, the values section contains `leaf_count × entry_size` bytes at offset `values_offset`.
 
 Leaf `i` occupies bytes `[values_offset + i × entry_size, values_offset + (i+1) × entry_size)`.
@@ -169,9 +177,7 @@ Range: bytes={values_offset + leaf_index * entry_size}-{values_offset + (leaf_in
 
 The values section is **not compressed**, enabling direct Range Request access.
 
-### Multi-band / Multi-field
-
-The field schema describes the internal layout of each entry. For example, a 3-band population grid:
+**Multi-field example** (row layout):
 
 ```
 entry_size: 6
@@ -180,9 +186,38 @@ fields: [
     { type: uint16, offset: 2, name: "male" },
     { type: uint16, offset: 4, name: "female" },
 ]
+
+Values: [total₀|male₀|female₀][total₁|male₁|female₁]...
 ```
 
 Each leaf's 6 bytes contain all three values contiguously.
+
+### 4b. Columnar Layout (flags bit 1 = 1)
+
+Values are stored column-by-column in field schema order. `entry_size` is 0 (not applicable).
+
+```
+[column 0: leaf_count values] [column 1: leaf_count values] ...
+```
+
+- **Fixed-size types** (uint8–uint64, float32/64): `leaf_count × type_size` bytes, little-endian.
+- **Varint** (type 10): `leaf_count` unsigned LEB128 values, sequentially packed.
+
+**Example** (columnar layout, varint):
+
+```
+entry_size: 0
+fields: [
+    { type: varint, offset: 0, name: "total" },
+    { type: varint, offset: 0, name: "male" },
+    { type: varint, offset: 0, name: "female" },
+]
+
+Values: [total₀ total₁ total₂ ...][male₀ male₁ ...][female₀ female₁ ...]
+         (varint, variable bytes)   (varint)          (varint)
+```
+
+Columnar layout is optimized for bulk download with compression (gzip). Same-type values cluster together, producing better compression ratios than row layout. Per-cell Range Requests are **not supported** in columnar mode.
 
 ## 5. Varint Section (Variable-Entry Mode)
 
@@ -320,14 +355,14 @@ Variable mode uses **columnar** layout (all run_lengths, then all lengths, then 
 ## 11. Summary
 
 ```
-                    Variable mode              Fixed mode
-                    (entry_size=0)             (entry_size>0)
-─────────────────   ─────────────────────────  ─────────────────────────
-Use case            Tile archives (MVT, PNG)   Raster grids, records
-ID storage          Zero (bitmask implies)     Zero (bitmask implies)
-Per-entry metadata  offset + length (varint)   None (computed from index)
-Access granularity  Per tile                   Per cell
-Data file           External, variable-size    Inline or external, fixed-size
-Compression         Index: gzip; Data: any     Index: gzip; Values: none (Range)
-Replaces            PMTiles                    GeoTIFF (sparse data)
+                    Variable mode           Fixed row               Fixed columnar
+                    (flags=0x0)             (flags=0x1)             (flags=0x3)
+─────────────────   ──────────────────────  ──────────────────────  ──────────────────────
+Use case            Tile archives           Raster grids (Range)    Compressed grids
+ID storage          Zero (bitmask)          Zero (bitmask)          Zero (bitmask)
+Per-entry metadata  offset+length (varint)  None (index-computed)   None
+Value types         N/A                     Fixed-size only (1–9)   Fixed + varint (1–10)
+Access              Per tile                Per cell (Range Req)    Whole file (gzip)
+Compression         Index: gzip; Data: any  Index: gzip; Values: ×  Entire file: gzip
+Replaces            PMTiles                 COG (sparse)            Parquet (sparse)
 ```

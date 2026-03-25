@@ -1,6 +1,6 @@
 {
   "name": "qbtiles",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "Quadkey Bitmask Tiles — cloud-optimized tile index and spatial grid format",
   "main": "dist/qbtiles.js",
   "module": "dist/qbtiles.mjs",

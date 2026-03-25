@@ -68,15 +68,26 @@ export async function deserializeBitmaskIndex(
   buffer: ArrayBuffer,
   zoom: number,
   onProgress?: (msg: string) => void,
+  options?: { bitmaskByteLength?: number; bufferOffset?: number },
 ): Promise<BitmaskIndex> {
   const view = new DataView(buffer);
-  const bitmaskByteLen = view.getUint32(0); // big-endian
+  const bufOffset = options?.bufferOffset ?? 0;
+
+  let bitmaskByteLen: number;
+  let dataStart: number;
+  if (options?.bitmaskByteLength !== undefined) {
+    bitmaskByteLen = options.bitmaskByteLength;
+    dataStart = bufOffset;
+  } else {
+    bitmaskByteLen = view.getUint32(bufOffset); // big-endian 4B prefix
+    dataStart = bufOffset + 4;
+  }
 
   onProgress?.('Unpacking bitmask...');
   const count = bitmaskByteLen * 2;
   const nibbles = new Uint8Array(count);
   for (let i = 0; i < bitmaskByteLen; i++) {
-    const byte = view.getUint8(4 + i);
+    const byte = view.getUint8(dataStart + i);
     nibbles[i * 2] = byte >> 4;
     nibbles[i * 2 + 1] = byte & 0x0f;
   }
@@ -238,7 +249,7 @@ export function queryBbox(index: BitmaskIndex, bbox: BBox, grid: GridParams): Qu
 // Range merging + fetch
 // ---------------------------------------------------------------------------
 
-export function mergeRanges(indices: number[], maxGap = 256): ByteRange[] {
+export function mergeRanges(indices: number[], maxGap = 256, entrySize = 4): ByteRange[] {
   if (indices.length === 0) return [];
 
   const sorted = indices.slice().sort((a, b) => a - b);
@@ -253,13 +264,13 @@ export function mergeRanges(indices: number[], maxGap = 256): ByteRange[] {
       rangeEnd = sorted[i];
       leafIndices.push(sorted[i]);
     } else {
-      ranges.push({ byteStart: rangeStart * 4, byteEnd: rangeEnd * 4 + 3, leafIndices });
+      ranges.push({ byteStart: rangeStart * entrySize, byteEnd: (rangeEnd + 1) * entrySize - 1, leafIndices });
       rangeStart = sorted[i];
       rangeEnd = sorted[i];
       leafIndices = [sorted[i]];
     }
   }
-  ranges.push({ byteStart: rangeStart * 4, byteEnd: rangeEnd * 4 + 3, leafIndices });
+  ranges.push({ byteStart: rangeStart * entrySize, byteEnd: (rangeEnd + 1) * entrySize - 1, leafIndices });
 
   return ranges;
 }
@@ -276,6 +287,7 @@ export async function fetchRanges(
   ranges: ByteRange[],
   signal?: AbortSignal,
   onProgress?: (point: TrafficPoint) => void,
+  valuesOffset = 0,
 ): Promise<{
   values: Map<number, number>;
   totalBytes: number;
@@ -310,7 +322,7 @@ export async function fetchRanges(
   await Promise.all(
     uncachedRanges.map(async (range) => {
       const res = await fetch(url, {
-        headers: { Range: `bytes=${range.byteStart}-${range.byteEnd}` },
+        headers: { Range: `bytes=${valuesOffset + range.byteStart}-${valuesOffset + range.byteEnd}` },
         signal,
       });
       requestCount++;

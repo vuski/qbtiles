@@ -9,6 +9,8 @@ export { type BBox, type GridParams, splitAntimeridian, bboxToRowColRange, lonTo
 export { type BitmaskIndex, type ByteRange, type QBTCellData, type QBTChunk, type QueryResult, type TrafficPoint, deserializeBitmaskIndex, queryBbox, mergeRanges, fetchRanges, clearLeafCache, queryResultToCells, queryResultToChunks } from './bitmask-index';
 export { type BitmaskEntry, deserializeBitmaskValues } from './bitmask-values';
 export { decodeCustomQuadkey } from './custom-crs';
+export { type QBTHeader, type QBTFieldDescriptor, parseQBTHeader, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32, TYPE_FLOAT64, TYPE_INT64, TYPE_UINT64, TYPE_VARINT, TYPE_SIZE } from './qbt-header';
+export { type LoadResult, loadQBT, readColumnarValues, clearIndexCache } from './qbt-reader';
 
 // --- Tile archive index (original) ---
 

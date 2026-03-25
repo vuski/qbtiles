@@ -9,6 +9,8 @@ BFS 순회로 모든 quadkey를 복원한다.
 import os
 import io
 import gzip
+import struct
+import hashlib
 from io import BytesIO
 
 
@@ -637,3 +639,388 @@ def decode_custom_quadkey(qk_int64, zoom, origin_x, origin_y, extent):
     y_center = origin_y + tile_y * tile_size + tile_size / 2
 
     return int(x_center), int(y_center)
+
+
+# ============================================================
+# QBT v1.0 File Format
+# ============================================================
+
+# Type codes
+TYPE_UINT8 = 1
+TYPE_INT16 = 2
+TYPE_UINT16 = 3
+TYPE_INT32 = 4
+TYPE_UINT32 = 5
+TYPE_FLOAT32 = 6
+TYPE_FLOAT64 = 7
+TYPE_INT64 = 8
+TYPE_UINT64 = 9
+TYPE_VARINT = 10
+
+_TYPE_SIZE = {
+    TYPE_UINT8: 1, TYPE_INT16: 2, TYPE_UINT16: 2,
+    TYPE_INT32: 4, TYPE_UINT32: 4, TYPE_FLOAT32: 4,
+    TYPE_FLOAT64: 8, TYPE_INT64: 8, TYPE_UINT64: 8,
+}
+
+_TYPE_STRUCT = {
+    TYPE_UINT8: 'B', TYPE_INT16: 'h', TYPE_UINT16: 'H',
+    TYPE_INT32: 'i', TYPE_UINT32: 'I', TYPE_FLOAT32: 'f',
+    TYPE_FLOAT64: 'd', TYPE_INT64: 'q', TYPE_UINT64: 'Q',
+}
+
+
+def serialize_bitmask(root):
+    """BFS 순회로 쿼드트리를 비트마스크 바이트로 직렬화.
+
+    Returns:
+        (bitmask_bytes, leaf_count): 팩킹된 비트마스크와 리프 수.
+    """
+    current_level = [root]
+    bitmask_list = []
+    leaf_count = 0
+
+    while current_level:
+        next_level = []
+        level_masks = []
+
+        for node in current_level:
+            mask = 0
+            for key in range(4):
+                if key in node.children:
+                    mask |= (8 >> key)
+                    next_level.append(node.children[key])
+            level_masks.append(mask)
+
+        if sum(level_masks) == 0:
+            leaf_count = len(current_level)
+            break
+
+        bitmask_list.extend(level_masks)
+        current_level = next_level
+
+    if leaf_count == 0:
+        leaf_count = len(current_level) if current_level else 0
+
+    bitmask_bytes = bytearray()
+    for i in range(0, len(bitmask_list), 2):
+        first = bitmask_list[i]
+        second = bitmask_list[i + 1] if i + 1 < len(bitmask_list) else 0
+        bitmask_bytes.append((first << 4) | second)
+
+    return bytes(bitmask_bytes), leaf_count
+
+
+def _encode_field_schema(fields):
+    """Field schema를 바이트로 인코딩."""
+    buf = bytearray()
+    for f in fields:
+        name_bytes = f['name'].encode('utf-8')
+        buf.append(f['type'])
+        buf.append(f.get('offset', 0))
+        buf.extend(struct.pack('<H', len(name_bytes)))
+        buf.extend(name_bytes)
+    return bytes(buf)
+
+
+def _write_qbt_header(bitmask_bytes, values_bytes, zoom, flags,
+                       crs=4326, origin_x=0.0, origin_y=0.0,
+                       extent_x=0.0, extent_y=0.0, entry_size=0,
+                       fields=None, metadata_bytes=None):
+    """128B+ QBT 헤더 생성.
+
+    Returns:
+        (header_bytes, compressed_bitmask, header_size)
+    """
+    field_schema_bytes = _encode_field_schema(fields) if fields else b''
+    header_size = 128 + len(field_schema_bytes)
+
+    compressed_bitmask = gzip.compress(bitmask_bytes)
+    bitmask_length = len(compressed_bitmask)
+    values_offset = header_size + bitmask_length
+    values_length = len(values_bytes)
+
+    metadata_offset = 0
+    metadata_length = 0
+    if metadata_bytes:
+        metadata_offset = values_offset + values_length
+        metadata_length = len(metadata_bytes)
+
+    index_hash = hashlib.sha256(bitmask_bytes).digest()
+
+    header = bytearray(128)
+    # magic
+    header[0:4] = b'QBT\x01'
+    # version
+    struct.pack_into('<H', header, 4, 1)
+    # header_size
+    struct.pack_into('<H', header, 6, header_size)
+    # flags
+    struct.pack_into('<I', header, 8, flags)
+    # zoom
+    header[12] = zoom
+    # reserved byte
+    header[13] = 0
+    # crs
+    struct.pack_into('<H', header, 14, crs)
+    # origin_x, origin_y
+    struct.pack_into('<d', header, 16, origin_x)
+    struct.pack_into('<d', header, 24, origin_y)
+    # extent_x, extent_y
+    struct.pack_into('<d', header, 32, extent_x)
+    struct.pack_into('<d', header, 40, extent_y)
+    # bitmask_length
+    struct.pack_into('<Q', header, 48, bitmask_length)
+    # values_offset
+    struct.pack_into('<Q', header, 56, values_offset)
+    # values_length
+    struct.pack_into('<Q', header, 64, values_length)
+    # metadata_offset, metadata_length
+    struct.pack_into('<Q', header, 72, metadata_offset)
+    struct.pack_into('<Q', header, 80, metadata_length)
+    # entry_size
+    struct.pack_into('<I', header, 88, entry_size)
+    # field_count
+    struct.pack_into('<H', header, 92, len(fields) if fields else 0)
+    # index_hash (32 bytes at offset 94)
+    header[94:126] = index_hash
+    # reserved (2 bytes at offset 126)
+    header[126:128] = b'\x00\x00'
+
+    return bytes(header) + field_schema_bytes, compressed_bitmask, header_size
+
+
+def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
+                    zoom, crs=4326, origin_x=0.0, origin_y=0.0,
+                    extent_x=0.0, extent_y=0.0, entry_size=4,
+                    fields=None, metadata=None):
+    """Fixed-entry row 모드 QBT 파일 생성.
+
+    Args:
+        bitmask_bytes: serialize_bitmask()의 결과.
+        values_bytes: leaf_count × entry_size 바이트의 값 데이터.
+        fields: [{'type': TYPE_FLOAT32, 'offset': 0, 'name': 'value'}, ...]
+    """
+    flags = 0x1  # bit0=1 (fixed), bit1=0 (row)
+    metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
+
+    header_bytes, compressed_bitmask, _ = _write_qbt_header(
+        bitmask_bytes, values_bytes, zoom, flags,
+        crs, origin_x, origin_y, extent_x, extent_y,
+        entry_size, fields, metadata_bytes)
+
+    with open(output_path, 'wb') as f:
+        f.write(header_bytes)
+        f.write(compressed_bitmask)
+        f.write(values_bytes)
+        if metadata_bytes:
+            f.write(metadata_bytes)
+
+
+def write_qbt_columnar(output_path, bitmask_bytes, columns, leaf_count,
+                       zoom, crs=4326, origin_x=0.0, origin_y=0.0,
+                       extent_x=0.0, extent_y=0.0,
+                       fields=None, metadata=None, compress=True):
+    """Fixed-entry columnar 모드 QBT 파일 생성.
+
+    Args:
+        bitmask_bytes: serialize_bitmask()의 결과.
+        columns: list of (type_code, values) — varint이면 list[int], 고정이면 list[number].
+        leaf_count: 리프 수.
+        fields: [{'type': TYPE_VARINT, 'offset': 0, 'name': 'total'}, ...]
+    """
+    # Serialize columns
+    values_io = BytesIO()
+    for type_code, values in columns:
+        if len(values) != leaf_count:
+            raise ValueError(f"Column length {len(values)} != leaf_count {leaf_count}")
+        if type_code == TYPE_VARINT:
+            for v in values:
+                write_varint(values_io, v)
+        else:
+            fmt = '<' + _TYPE_STRUCT[type_code]
+            for v in values:
+                values_io.write(struct.pack(fmt, v))
+
+    values_bytes = values_io.getvalue()
+
+    flags = 0x3  # bit0=1 (fixed), bit1=1 (columnar)
+    metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
+
+    header_bytes, compressed_bitmask, _ = _write_qbt_header(
+        bitmask_bytes, values_bytes, zoom, flags,
+        crs, origin_x, origin_y, extent_x, extent_y,
+        0, fields, metadata_bytes)  # entry_size=0 for columnar
+
+    content = header_bytes + compressed_bitmask + values_bytes
+    if metadata_bytes:
+        content += metadata_bytes
+
+    if compress:
+        with open(output_path, 'wb') as f:
+            f.write(gzip.compress(content))
+    else:
+        with open(output_path, 'wb') as f:
+            f.write(content)
+
+
+def write_qbt_variable(output_path, root, data_path=None,
+                       zoom=None, crs=4326, origin_x=-180.0, origin_y=90.0,
+                       extent_x=360.0, extent_y=180.0, metadata=None):
+    """Variable-entry 모드 QBT 파일 생성 (타일 아카이브 인덱스).
+
+    Args:
+        root: 쿼드트리 루트 노드.
+        data_path: 외부 데이터 파일 경로 (inline이 아닌 경우).
+    """
+    # BFS → bitmask + varints
+    current_level = [root]
+    bitmask_list = []
+    run_lengths = []
+    lengths = []
+    offsets_list = []
+
+    while current_level:
+        next_level = []
+        level_masks = []
+        for node in current_level:
+            mask = 0
+            for key in range(4):
+                if key in node.children:
+                    mask |= (8 >> key)
+                    next_level.append(node.children[key])
+            level_masks.append(mask)
+            run_lengths.append(node.run_length)
+            lengths.append(node.length)
+            offsets_list.append(node.offset)
+
+        if sum(level_masks) == 0:
+            break
+        bitmask_list.extend(level_masks)
+        current_level = next_level
+
+    # Pack bitmask
+    bitmask_bytes = bytearray()
+    for i in range(0, len(bitmask_list), 2):
+        first = bitmask_list[i]
+        second = bitmask_list[i + 1] if i + 1 < len(bitmask_list) else 0
+        bitmask_bytes.append((first << 4) | second)
+    bitmask_bytes = bytes(bitmask_bytes)
+
+    # Serialize varints (columnar: run_lengths, lengths, offsets)
+    varint_io = BytesIO()
+    for val in run_lengths:
+        write_varint(varint_io, val)
+    for val in lengths:
+        write_varint(varint_io, val)
+    for i in range(len(offsets_list)):
+        if i > 0 and offsets_list[i] == offsets_list[i - 1] + lengths[i - 1]:
+            write_varint(varint_io, 0)
+        else:
+            write_varint(varint_io, offsets_list[i] + 1)
+    varint_bytes = varint_io.getvalue()
+
+    # Variable-entry: bitmask + varints 합쳐서 gzip (통째로 한 번 받으니까)
+    index_bytes = bitmask_bytes + varint_bytes
+    compressed_index = gzip.compress(index_bytes)
+
+    flags = 0x0  # bit0=0 (variable), bit1=0 (row)
+    metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
+
+    # bitmask_length = compressed index (bitmask + varints)
+    # values_offset/values_length = 0 (외부 데이터 파일)
+    field_schema_bytes = b''
+    header_size = 128
+    index_hash = hashlib.sha256(index_bytes).digest()
+
+    metadata_offset = 0
+    metadata_length = 0
+    if metadata_bytes:
+        metadata_offset = header_size + len(compressed_index)
+        metadata_length = len(metadata_bytes)
+
+    header = bytearray(128)
+    header[0:4] = b'QBT\x01'
+    struct.pack_into('<H', header, 4, 1)
+    struct.pack_into('<H', header, 6, header_size)
+    struct.pack_into('<I', header, 8, flags)
+    header[12] = zoom or 0
+    struct.pack_into('<H', header, 14, crs)
+    struct.pack_into('<d', header, 16, origin_x)
+    struct.pack_into('<d', header, 24, origin_y)
+    struct.pack_into('<d', header, 32, extent_x)
+    struct.pack_into('<d', header, 40, extent_y)
+    struct.pack_into('<Q', header, 48, len(compressed_index))
+    struct.pack_into('<Q', header, 56, 0)  # values_offset = 0 (external)
+    struct.pack_into('<Q', header, 64, 0)  # values_length = 0
+    struct.pack_into('<Q', header, 72, metadata_offset)
+    struct.pack_into('<Q', header, 80, metadata_length)
+    struct.pack_into('<I', header, 88, 0)  # entry_size = 0
+    struct.pack_into('<H', header, 92, 0)  # field_count = 0
+    header[94:126] = index_hash
+    header[126:128] = b'\x00\x00'
+
+    with open(output_path, 'wb') as f:
+        f.write(bytes(header))
+        f.write(compressed_index)
+        if metadata_bytes:
+            f.write(metadata_bytes)
+
+
+def read_qbt_header(filepath_or_bytes):
+    """QBT 파일 헤더를 파싱하여 dict로 반환.
+
+    Args:
+        filepath_or_bytes: 파일 경로(str) 또는 bytes/bytearray.
+
+    Returns:
+        dict with header fields + 'fields' list.
+    """
+    if isinstance(filepath_or_bytes, (str, os.PathLike)):
+        with open(filepath_or_bytes, 'rb') as f:
+            raw = f.read(1024)  # 충분히 읽어서 field schema 포함
+    else:
+        raw = filepath_or_bytes
+
+    # gzip인 경우 해제
+    if raw[:2] == b'\x1f\x8b':
+        raw = gzip.decompress(raw if isinstance(filepath_or_bytes, (bytes, bytearray))
+                              else open(filepath_or_bytes, 'rb').read())
+
+    if raw[:4] != b'QBT\x01':
+        raise ValueError(f"Invalid magic: {raw[:4]}")
+
+    h = {}
+    h['magic'] = raw[:4]
+    h['version'] = struct.unpack_from('<H', raw, 4)[0]
+    h['header_size'] = struct.unpack_from('<H', raw, 6)[0]
+    h['flags'] = struct.unpack_from('<I', raw, 8)[0]
+    h['is_fixed'] = bool(h['flags'] & 0x1)
+    h['is_columnar'] = bool(h['flags'] & 0x2)
+    h['zoom'] = raw[12]
+    h['crs'] = struct.unpack_from('<H', raw, 14)[0]
+    h['origin_x'] = struct.unpack_from('<d', raw, 16)[0]
+    h['origin_y'] = struct.unpack_from('<d', raw, 24)[0]
+    h['extent_x'] = struct.unpack_from('<d', raw, 32)[0]
+    h['extent_y'] = struct.unpack_from('<d', raw, 40)[0]
+    h['bitmask_length'] = struct.unpack_from('<Q', raw, 48)[0]
+    h['values_offset'] = struct.unpack_from('<Q', raw, 56)[0]
+    h['values_length'] = struct.unpack_from('<Q', raw, 64)[0]
+    h['metadata_offset'] = struct.unpack_from('<Q', raw, 72)[0]
+    h['metadata_length'] = struct.unpack_from('<Q', raw, 80)[0]
+    h['entry_size'] = struct.unpack_from('<I', raw, 88)[0]
+    h['field_count'] = struct.unpack_from('<H', raw, 92)[0]
+    h['index_hash'] = raw[94:126].hex()
+
+    # Parse field schema
+    h['fields'] = []
+    offset = 128
+    for _ in range(h['field_count']):
+        ftype = raw[offset]
+        foffset = raw[offset + 1]
+        name_len = struct.unpack_from('<H', raw, offset + 2)[0]
+        name = raw[offset + 4:offset + 4 + name_len].decode('utf-8')
+        h['fields'].append({'type': ftype, 'offset': foffset, 'name': name})
+        offset += 4 + name_len
+
+    return h

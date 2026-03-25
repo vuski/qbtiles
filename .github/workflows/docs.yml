@@ -37,8 +37,7 @@ jobs:
           npm run build
           cp ../examples/korea_tiles.idx.gz ../docs/demo/tiles/
           cp ../examples/korea_tiles.data ../docs/demo/tiles/
-          cp ../examples/korea_pop_100m.gz ../docs/demo/population/
-          cp ../examples/global_pop_bitmask.gz ../docs/demo/range-request/
+          cp ../examples/korea_pop_100m.qbt.gz ../docs/demo/population/
 
       - run: pip install mkdocs-material "mkdocs-jupyter==0.25.1"
 

@@ -260,15 +260,18 @@ function App() {
       initialViewState={{ longitude: 127.5, latitude: 36, zoom: 7 }}
       onMapLoad={handleMapLoad}
     >
-      <InfoPanel title="Tile Map Viewer">
+      <InfoPanel title="QBTiles Viewer">
         {loading ? (
           <p style={{ margin: '8px 0 0' }}>Loading index...</p>
         ) : error ? (
           <p style={{ margin: '8px 0 0', color: '#ff6b6b' }}>{error}</p>
         ) : (
           <div style={{ margin: '8px 0 0', fontSize: 13 }}>
+            <div style={{ marginBottom: 6, fontSize: 12, color: '#aaa' }}>
+              File: Administrative boundaries of South Korea<br/>
+              Format: MVT &middot; Size: {fmt(stats.indexSize)} (index) + 31 MB (data)
+            </div>
             <div>Zoom: {zoom}</div>
-            <div>Index: {fmt(stats.indexSize)} (gzip)</div>
             <div>Entries: {stats.entries.toLocaleString()}</div>
             <div>Tiles loaded: {stats.tilesLoaded}</div>
             <div>Bytes requested: {fmt(stats.bytesRequested)}</div>

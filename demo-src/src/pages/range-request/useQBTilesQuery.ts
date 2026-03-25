@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { type BBox, splitAntimeridian, WORLD_POP_GRID, ZOOM } from '../../lib/geo-constants';
+import { type BBox, splitAntimeridian, WORLD_POP_GRID } from '../../lib/geo-constants';
 import {
   type BitmaskIndex,
   type QBTCellData,
   type QBTChunk,
-  deserializeBitmaskIndex,
+  type QBTHeader,
   queryBbox,
   mergeRanges,
   fetchRanges,
   queryResultToCells,
   queryResultToChunks,
+  loadQBT,
 } from 'qbtiles';
 
 export interface QBTStats {
@@ -17,15 +18,15 @@ export interface QBTStats {
   bytes: number;
   cells: number;
   timeMs: number;
-  estimatedRequests: number; // without cache
-  estimatedBytes: number;    // without cache
+  estimatedRequests: number;
+  estimatedBytes: number;
   cachedCells: number;
 }
 
 export interface QBTQueryState {
   indexLoading: boolean;
   indexProgress: string;
-  indexBytes: number; // bitmask download size
+  indexBytes: number;
   querying: boolean;
   error: string | null;
   results: QBTCellData[] | null;
@@ -33,7 +34,7 @@ export interface QBTQueryState {
   stats: QBTStats | null;
 }
 
-export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
+export function useQBTilesQuery(qbtUrl: string) {
   const [state, setState] = useState<QBTQueryState>({
     indexLoading: true,
     indexProgress: 'Downloading index...',
@@ -46,6 +47,7 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
   });
 
   const indexRef = useRef<BitmaskIndex | null>(null);
+  const headerRef = useRef<QBTHeader | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -61,34 +63,15 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
 
     (async () => {
       try {
-        setState((s) => ({ ...s, indexProgress: 'Downloading index...' }));
-        const res = await fetch(bitmaskUrl);
-        const compressed = await res.arrayBuffer();
-        // Use Content-Length for actual transfer size (server may auto-decompress .gz)
-        const cl = res.headers.get('Content-Length');
-        const indexBytes = cl ? parseInt(cl, 10) : compressed.byteLength;
-        const sizeStr = (indexBytes / 1024 / 1024).toFixed(1);
-
-        setState((s) => ({ ...s, indexBytes, indexProgress: `Decompressing (${sizeStr} MB)...` }));
-        const bytes = new Uint8Array(compressed);
-        let buffer: ArrayBuffer;
-        if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
-          const ds = new DecompressionStream('gzip');
-          const writer = ds.writable.getWriter();
-          writer.write(bytes);
-          writer.close();
-          buffer = await new Response(ds.readable).arrayBuffer();
-        } else {
-          buffer = compressed;
-        }
-
-        const index = await deserializeBitmaskIndex(buffer, ZOOM, (msg) =>
+        const { header, index, indexBytes } = await loadQBT(qbtUrl, (msg) =>
           setState((s) => ({ ...s, indexProgress: msg })),
         );
         indexRef.current = index;
+        headerRef.current = header;
         setState((s) => ({
           ...s,
           indexLoading: false,
+          indexBytes,
           indexProgress: `Ready: ${index.totalLeaves.toLocaleString()} cells`,
         }));
       } catch (err: any) {
@@ -99,12 +82,13 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
         }));
       }
     })();
-  }, [bitmaskUrl]);
+  }, [qbtUrl]);
 
   const query = useCallback(
     async (bbox: BBox, onProgress?: (p: { request: number; bytes: number }) => void): Promise<{ bytes: number } | undefined> => {
       const index = indexRef.current;
-      if (!index) return undefined;
+      const header = headerRef.current;
+      if (!index || !header) return undefined;
 
       abortRef.current?.abort();
       const ac = new AbortController();
@@ -121,7 +105,6 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
 
       try {
         const t0 = performance.now();
-        // Split across antimeridian if needed
         const bboxes = splitAntimeridian(bbox);
         let allLeafIndices: number[] = [];
         let allRows: number[] = [];
@@ -145,10 +128,10 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
           return { bytes: 0 };
         }
 
-        const ranges = mergeRanges(result.leafIndices);
+        const ranges = mergeRanges(result.leafIndices, 256, header.entrySize);
 
         const { values, totalBytes, requestCount, estimatedBytes, estimatedRequests, cachedCells } =
-          await fetchRanges(valuesUrl, ranges, ac.signal, onProgress);
+          await fetchRanges(qbtUrl, ranges, ac.signal, onProgress, header.valuesOffset);
 
         const cells = queryResultToCells(result, values, ranges, WORLD_POP_GRID);
         const chunks = queryResultToChunks(result, ranges, WORLD_POP_GRID);
@@ -181,7 +164,7 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
         }
       }
     },
-    [valuesUrl],
+    [qbtUrl],
   );
 
   return { state, query };
