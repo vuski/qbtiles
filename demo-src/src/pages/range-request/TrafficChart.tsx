@@ -7,7 +7,7 @@ import {
   LegendComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
-import type { TrafficPoint } from '../../lib/bitmask-index';
+import type { TrafficPoint } from 'qbtiles';
 import type { COGTrafficPoint } from '../../lib/cog-query';
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);

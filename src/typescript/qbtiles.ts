@@ -1,9 +1,16 @@
 /**
- * QBTiles - Quadtree Bitmask Tile Index (Client Reader)
+ * QBTiles - Quadkey Bitmask Tiles
  *
- * gzip 해제된 바이너리 인덱스 버퍼를 역직렬화하여
- * Map<bigint, QBTilesIndex>로 변환한다.
+ * Tile archive index + spatial grid data format.
  */
+
+// --- Re-exports from submodules ---
+export { type BBox, type GridParams, splitAntimeridian, bboxToRowColRange, lonToCol, latToRow, colToLon, rowToLat } from './types';
+export { type BitmaskIndex, type ByteRange, type QBTCellData, type QBTChunk, type QueryResult, type TrafficPoint, deserializeBitmaskIndex, queryBbox, mergeRanges, fetchRanges, clearLeafCache, queryResultToCells, queryResultToChunks } from './bitmask-index';
+export { type BitmaskEntry, deserializeBitmaskValues } from './bitmask-values';
+export { decodeCustomQuadkey } from './custom-crs';
+
+// --- Tile archive index (original) ---
 
 export interface QBTilesIndex {
   quadkey_int: bigint;

@@ -1,7 +1,7 @@
 {
   "name": "qbtiles",
-  "version": "0.1.0",
-  "description": "Quadkey Bitmask Tiles — cloud-optimized tile index format",
+  "version": "0.2.0",
+  "description": "Quadkey Bitmask Tiles — cloud-optimized tile index and spatial grid format",
   "main": "dist/qbtiles.js",
   "module": "dist/qbtiles.mjs",
   "types": "dist/qbtiles.d.ts",
@@ -12,7 +12,7 @@
     "build": "tsc",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["tiles", "quadkey", "pmtiles", "gis", "spatial-index", "map"],
+  "keywords": ["tiles", "quadkey", "pmtiles", "gis", "spatial-index", "map", "raster", "range-request", "cloud-native", "geotiff"],
   "author": "vuski",
   "license": "MIT",
   "repository": {

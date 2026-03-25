@@ -5,7 +5,7 @@ import type { BBox } from "../../lib/geo-constants";
 import { SplitMap, type ViewState } from "./SplitMap";
 import { useQBTilesQuery } from "./useQBTilesQuery";
 import { useCOGQuery } from "./useCOGQuery";
-import type { QBTCellData } from "../../lib/bitmask-index";
+import type { QBTCellData } from "qbtiles";
 import type { COGCellData } from "../../lib/cog-query";
 import { TrafficChart } from "./TrafficChart";
 
@@ -54,7 +54,7 @@ function App() {
     pitch: 30,
     bearing: 0,
   });
-  const [bbox, setBbox] = useState<BBox>([126.5, 35.5, 128.5, 37.5]);
+  const [bbox, setBbox] = useState<BBox>([126.8, 37.4, 127.2, 37.7]);
 
   const qbt = useQBTilesQuery(BITMASK_URL, VALUES_URL);
   const cog = useCOGQuery(COG_URL);

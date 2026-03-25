@@ -12,7 +12,6 @@ export function decodeCustomQuadkey(
   originY: number,
   extent: number,
 ): [x: number, y: number] {
-  // Strip the 0b11 prefix: quadkey data is the lower 2*zoom bits
   const qk = Number(qkInt64 & ((1n << BigInt(zoom * 2)) - 1n));
 
   let tileX = 0;

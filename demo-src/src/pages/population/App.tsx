@@ -4,8 +4,7 @@ import { MapShell } from '../../components/MapShell';
 import { InfoPanel } from '../../components/InfoPanel';
 import { ColumnLayer } from '@deck.gl/layers';
 import proj4 from 'proj4';
-import { deserializeBitmaskValues } from '../../lib/bitmask-values';
-import { decodeCustomQuadkey } from '../../lib/custom-crs';
+import { deserializeBitmaskValues, decodeCustomQuadkey } from 'qbtiles';
 
 const DATA_URL = './korea_pop_100m.gz';
 

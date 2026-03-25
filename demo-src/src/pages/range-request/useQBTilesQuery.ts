@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { type BBox, splitAntimeridian } from '../../lib/geo-constants';
+import { type BBox, splitAntimeridian, WORLD_POP_GRID, ZOOM } from '../../lib/geo-constants';
 import {
   type BitmaskIndex,
   type QBTCellData,
@@ -10,7 +10,7 @@ import {
   fetchRanges,
   queryResultToCells,
   queryResultToChunks,
-} from '../../lib/bitmask-index';
+} from 'qbtiles';
 
 export interface QBTStats {
   requests: number;
@@ -82,7 +82,7 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
           buffer = compressed;
         }
 
-        const index = await deserializeBitmaskIndex(buffer, (msg) =>
+        const index = await deserializeBitmaskIndex(buffer, ZOOM, (msg) =>
           setState((s) => ({ ...s, indexProgress: msg })),
         );
         indexRef.current = index;
@@ -127,7 +127,7 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
         let allRows: number[] = [];
         let allCols: number[] = [];
         for (const b of bboxes) {
-          const r = queryBbox(index, b);
+          const r = queryBbox(index, b, WORLD_POP_GRID);
           allLeafIndices = allLeafIndices.concat(r.leafIndices);
           allRows = allRows.concat(r.rows);
           allCols = allCols.concat(r.cols);
@@ -150,8 +150,8 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
         const { values, totalBytes, requestCount, estimatedBytes, estimatedRequests, cachedCells } =
           await fetchRanges(valuesUrl, ranges, ac.signal, onProgress);
 
-        const cells = queryResultToCells(result, values, ranges);
-        const chunks = queryResultToChunks(result, ranges);
+        const cells = queryResultToCells(result, values, ranges, WORLD_POP_GRID);
+        const chunks = queryResultToChunks(result, ranges, WORLD_POP_GRID);
         const elapsed = performance.now() - t0;
 
         setState((s) => ({
