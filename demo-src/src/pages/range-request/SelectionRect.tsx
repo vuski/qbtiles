@@ -264,14 +264,23 @@ export function SelectionRect({
     map.on('mousedown', onMouseDown);
     map.on('mousemove', onMouseMove);
     map.on('mouseup', onMouseUp);
+    // Touch support: MapLibre fires touchstart/touchend but not always mouse equivalents
+    map.on('touchstart', onMouseDown as any);
+    map.on('touchmove', onMouseMove as any);
+    map.on('touchend', onMouseUp as any);
     const windowUp = () => onMouseUp();
     window.addEventListener('mouseup', windowUp);
+    window.addEventListener('touchend', windowUp);
 
     return () => {
       map.off('mousedown', onMouseDown);
       map.off('mousemove', onMouseMove);
       map.off('mouseup', onMouseUp);
+      map.off('touchstart', onMouseDown as any);
+      map.off('touchmove', onMouseMove as any);
+      map.off('touchend', onMouseUp as any);
       window.removeEventListener('mouseup', windowUp);
+      window.removeEventListener('touchend', windowUp);
     };
   }, [mapRef.current, updateSources, onBboxChange]);
 

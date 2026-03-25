@@ -48,8 +48,8 @@ interface ChartPoint {
 
 function App() {
   const [viewState, setViewState] = useState<ViewState>({
-    longitude: 127.5,
-    latitude: 36,
+    longitude: 127.0,
+    latitude: 37.55,
     zoom: 7,
     pitch: 30,
     bearing: 0,
@@ -251,6 +251,31 @@ function App() {
       >
         {isQuerying ? "Comparing..." : "Compare"}
       </button>
+
+      {/* Data attribution */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: 22,
+          left: 12,
+          fontSize: 11,
+          padding: "2px 6px",
+          backgroundColor: "rgba(0,0,0,0.6)",
+          borderRadius: 3,
+          fontFamily: "system-ui, sans-serif",
+          pointerEvents: "auto",
+          zIndex: 15,
+        }}
+      >
+        <a
+          href="https://hub.worldpop.org/geodata/summary?id=80031"
+          target="_blank"
+          rel="noopener"
+          style={{ color: "rgba(255,255,255,0.7)" }}
+        >
+          WorldPop Global Population Count 2025, 1km
+        </a>
+      </div>
     </SplitMap>
   );
 }
