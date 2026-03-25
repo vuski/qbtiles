@@ -49,6 +49,16 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    // Guard against StrictMode double-mount
+    if (indexRef.current) {
+      setState((s) => ({
+        ...s,
+        indexLoading: false,
+        indexProgress: `Ready: ${indexRef.current!.totalLeaves.toLocaleString()} cells`,
+      }));
+      return;
+    }
+
     (async () => {
       try {
         setState((s) => ({ ...s, indexProgress: 'Downloading index...' }));
