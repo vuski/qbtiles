@@ -16,19 +16,19 @@
 - Sparse tile distributions → larger deltas → more bytes
 - Empty tiles are "skipped" by encoding the gap as a number
 
-### QBTiles Index Structure
+### QBTiles File Structure (v0.5.0)
 
 ```
-[bitmask_byte_length (4 bytes, big-endian)]
-[bitmask section: 4-bit × 2 packed, BFS order]
-[run_lengths (varint array)]
-[lengths (varint array)]
-[offsets (varint array, delta encoded)]
+[128B+ header: magic, version, flags, zoom, CRS, origin, extent,
+               bitmask_length, values_offset, index_hash, field schema]
+[bitmask section: 4-bit × 2 packed, BFS order (gzip-compressed)]
+[values section: varints (variable mode) or fixed-size entries (fixed mode)]
 ```
 
 - **No tile_id array** — quadkeys reconstructed from bitmasks
 - Non-existent tiles are bit 0 — **zero cost**
-- Columnar storage → same-type values together → better delta+gzip compression
+- Columnar storage → same-type values together → better compression
+- Three modes: variable-entry (tiles), fixed row (Range Request), fixed columnar (bulk)
 
 ### Core Difference
 

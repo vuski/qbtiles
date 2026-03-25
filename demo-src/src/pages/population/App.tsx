@@ -71,12 +71,26 @@ function App() {
       await new Promise((r) => setTimeout(r, 0));
       const header = parseQBTHeader(buffer);
 
+      setLoadStatus('Decompressing bitmask...');
+      await new Promise((r) => setTimeout(r, 0));
+      const bitmaskCompressed = new Uint8Array(buffer, header.headerSize, header.bitmaskLength);
+      let bitmaskBuf: ArrayBuffer;
+      if (bitmaskCompressed[0] === 0x1f && bitmaskCompressed[1] === 0x8b) {
+        const ds2 = new DecompressionStream('gzip');
+        const w2 = ds2.writable.getWriter();
+        w2.write(bitmaskCompressed);
+        w2.close();
+        bitmaskBuf = await new Response(ds2.readable).arrayBuffer();
+      } else {
+        bitmaskBuf = bitmaskCompressed.buffer.slice(header.headerSize, header.headerSize + header.bitmaskLength);
+      }
+
       setLoadStatus('Building index...');
       await new Promise((r) => setTimeout(r, 0));
       const index = await deserializeBitmaskIndex(
-        buffer, header.zoom,
+        bitmaskBuf, header.zoom,
         (msg) => setLoadStatus(msg),
-        { bitmaskByteLength: header.bitmaskLength, bufferOffset: header.headerSize },
+        { bitmaskByteLength: bitmaskBuf.byteLength, bufferOffset: 0 },
       );
 
       setLoadStatus('Reading values...');

@@ -148,7 +148,7 @@ Level 2:          [grandchild bitmasks...]
 Level zoom-1:     [parent-of-leaf bitmasks]
 ```
 
-Traversal terminates when reaching zoom depth (leaf level). Leaf nodes have no bitmask entry — they are the data entries.
+Traversal terminates when reaching zoom depth (leaf level). Leaf nodes have no bitmask entry — they are the data entries. Each leaf is effectively represented by **a single bit** in its parent's bitmask: 1 = exists, 0 = empty.
 
 ### Quadkey Reconstruction
 
@@ -237,7 +237,9 @@ Each node's run_length value. Varint encoded.
 
 ### lengths[]
 
-Each node's data byte length. Varint encoded. Nodes with `length == 0` are internal (no data).
+Each node's data byte length. Varint encoded. Nodes with `length == 0` are internal-only (no tile data at that level).
+
+**Multi-level tile support:** Tiles can exist at any combination of zoom levels. A node with `length > 0` has tile data regardless of whether it also has children. This correctly handles tile sets where only certain zoom levels are populated, all zoom levels have tiles, or intermediate levels are missing — no special encoding needed.
 
 ### offsets[] (Delta Encoding)
 
@@ -333,19 +335,7 @@ Z-order (quadkey) sorting guarantees that spatially nearby cells have nearby lea
 | Extension        | Description                                      |
 |------------------|--------------------------------------------------|
 | `.qbt`           | QBTiles file (header + bitmask + values/varints)  |
-| `.qbt.gz`        | Gzip-compressed QBTiles (variable mode typical)  |
-| `.qbt.idx`       | Bitmask-only index (header + bitmask, no values) |
-| `.qbt.idx.gz`    | Gzip-compressed bitmask-only index               |
-| `.qbt.values`    | Values-only file (fixed mode, Range-requestable) |
-
-### Split-file deployment (fixed mode)
-
-For per-cell Range Request access, the file can be split:
-
-- **Index**: `.qbt.idx.gz` — header + bitmask, gzip-compressed (~MB), downloaded once
-- **Values**: `.qbt.values` — raw values, uncompressed (~hundreds of MB), Range-requested
-
-The index header's `values_offset` is 0 in split mode; the client uses `leaf_index × entry_size` directly against the values file URL.
+| `.qbt.gz`        | Gzip-compressed QBTiles (columnar mode typical)  |
 
 ## 10. Columnar vs Row Storage
 

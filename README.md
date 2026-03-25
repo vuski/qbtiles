@@ -207,9 +207,20 @@ Also available as pip package for file creation.
 
 ## Live Demos
 
-- **[Tile Viewer](https://vuski.github.io/qbtiles/demo/tiles/)** — MVT vector tiles served via QBTiles index + Range Request
-- **[Population Grid](https://vuski.github.io/qbtiles/demo/population/)** — 931K cells in 1.75MB columnar QBT file
-- **[Range Request Comparison](https://vuski.github.io/qbtiles/demo/range-request/)** — QBTiles cell-level vs COG block-level access
+### [Tile Viewer](https://vuski.github.io/qbtiles/demo/tiles/) — Variable-entry (0x0)
+MVT vector tiles served via QBTiles index + Range Request. Administrative boundaries of South Korea.
+
+[![Tile Viewer](https://raw.githubusercontent.com/vuski/qbtiles/main/docs/image-tiles.png)](https://vuski.github.io/qbtiles/demo/tiles/)
+
+### [Population Grid](https://vuski.github.io/qbtiles/demo/population/) — Fixed columnar (0x3)
+931K cells in 1.75 MB. Korea 100m population grid with 3 values per cell at 1.97 Byte/cell.
+
+[![Population Grid](https://raw.githubusercontent.com/vuski/qbtiles/main/docs/image-population.png)](https://vuski.github.io/qbtiles/demo/population/)
+
+### [Range Request Comparison](https://vuski.github.io/qbtiles/demo/range-request/) — Fixed row (0x1)
+Split-screen comparison: QBTiles cell-level vs COG block-level Range Request on WorldPop 1km global population.
+
+https://raw.githubusercontent.com/vuski/qbtiles/main/docs/comparison.mp4
 
 ## Related Work
 

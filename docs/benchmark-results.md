@@ -76,4 +76,4 @@ See [Example: Bitmask as a Data Container](examples/02_bitmask_as_data_container
 ## Conditions
 
 - PMTiles: sorted by tile_id, `serialize_directory()` (varint delta encoding, gzip)
-- QBTiles: sorted by quadkey, `write_tree_bitmask_to_single_file()` (bitmask BFS + columnar varint, gzip)
+- QBTiles: sorted by quadkey, `write_qbt_variable()` (bitmask BFS + columnar varint, gzip)

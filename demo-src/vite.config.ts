@@ -10,6 +10,7 @@ export default defineConfig(({ command }) => ({
     emptyOutDir: true,
     rollupOptions: {
       input: {
+        main: resolve(__dirname, 'index.html'),
         tiles: resolve(__dirname, 'tiles/index.html'),
         population: resolve(__dirname, 'population/index.html'),
         'range-request': resolve(__dirname, 'range-request/index.html'),
