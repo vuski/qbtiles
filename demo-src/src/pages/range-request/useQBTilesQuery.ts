@@ -54,7 +54,9 @@ export function useQBTilesQuery(bitmaskUrl: string, valuesUrl: string) {
         setState((s) => ({ ...s, indexProgress: 'Downloading index...' }));
         const res = await fetch(bitmaskUrl);
         const compressed = await res.arrayBuffer();
-        const indexBytes = compressed.byteLength;
+        // Use Content-Length for actual transfer size (server may auto-decompress .gz)
+        const cl = res.headers.get('Content-Length');
+        const indexBytes = cl ? parseInt(cl, 10) : compressed.byteLength;
         const sizeStr = (indexBytes / 1024 / 1024).toFixed(1);
 
         setState((s) => ({ ...s, indexBytes, indexProgress: `Decompressing (${sizeStr} MB)...` }));
