@@ -2,17 +2,36 @@
   "name": "qbtiles",
   "version": "0.5.0",
   "description": "Quadkey Bitmask Tiles — cloud-optimized tile index and spatial grid format",
-  "main": "dist/qbtiles.js",
-  "module": "dist/qbtiles.mjs",
-  "types": "dist/qbtiles.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/qbtiles.d.ts",
+      "import": "./dist/qbtiles.js",
+      "require": "./dist/qbtiles.cjs"
+    }
+  },
+  "main": "./dist/qbtiles.cjs",
+  "module": "./dist/qbtiles.js",
+  "types": "./dist/qbtiles.d.ts",
   "files": [
     "dist/"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup src/typescript/qbtiles.ts --format esm,cjs --dts",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["tiles", "quadkey", "pmtiles", "gis", "spatial-index", "map", "raster", "range-request", "cloud-native", "geotiff"],
+  "keywords": [
+    "tiles",
+    "quadkey",
+    "pmtiles",
+    "gis",
+    "spatial-index",
+    "map",
+    "raster",
+    "range-request",
+    "cloud-native",
+    "geotiff"
+  ],
   "author": "vuski",
   "license": "MIT",
   "repository": {
@@ -21,6 +40,7 @@
   },
   "homepage": "https://vuski.github.io/qbtiles/",
   "devDependencies": {
+    "tsup": "^8.5.1",
     "typescript": "^5.0.0"
   }
 }

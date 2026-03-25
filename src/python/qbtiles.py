@@ -726,17 +726,22 @@ def _encode_field_schema(fields):
 def _write_qbt_header(bitmask_bytes, values_bytes, zoom, flags,
                        crs=4326, origin_x=0.0, origin_y=0.0,
                        extent_x=0.0, extent_y=0.0, entry_size=0,
-                       fields=None, metadata_bytes=None):
+                       fields=None, metadata_bytes=None,
+                       compress_bitmask=True):
     """128B+ QBT 헤더 생성.
 
     Returns:
-        (header_bytes, compressed_bitmask, header_size)
+        (header_bytes, stored_bitmask, header_size)
     """
     field_schema_bytes = _encode_field_schema(fields) if fields else b''
     header_size = 128 + len(field_schema_bytes)
 
-    compressed_bitmask = gzip.compress(bitmask_bytes)
-    bitmask_length = len(compressed_bitmask)
+    if compress_bitmask:
+        stored_bitmask = gzip.compress(bitmask_bytes)
+    else:
+        stored_bitmask = bitmask_bytes
+        flags |= 0x4  # bit 2: raw bitmask
+    bitmask_length = len(stored_bitmask)
     values_offset = header_size + bitmask_length
     values_length = len(values_bytes)
 
@@ -787,13 +792,13 @@ def _write_qbt_header(bitmask_bytes, values_bytes, zoom, flags,
     # reserved (2 bytes at offset 126)
     header[126:128] = b'\x00\x00'
 
-    return bytes(header) + field_schema_bytes, compressed_bitmask, header_size
+    return bytes(header) + field_schema_bytes, stored_bitmask, header_size
 
 
 def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
                     zoom, crs=4326, origin_x=0.0, origin_y=0.0,
                     extent_x=0.0, extent_y=0.0, entry_size=4,
-                    fields=None, metadata=None):
+                    fields=None, metadata=None, compress_bitmask=True):
     """Fixed-entry row 모드 QBT 파일 생성.
 
     Args:
@@ -804,14 +809,15 @@ def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
     flags = 0x1  # bit0=1 (fixed), bit1=0 (row)
     metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
 
-    header_bytes, compressed_bitmask, _ = _write_qbt_header(
+    header_bytes, stored_bitmask, _ = _write_qbt_header(
         bitmask_bytes, values_bytes, zoom, flags,
         crs, origin_x, origin_y, extent_x, extent_y,
-        entry_size, fields, metadata_bytes)
+        entry_size, fields, metadata_bytes,
+        compress_bitmask=compress_bitmask)
 
     with open(output_path, 'wb') as f:
         f.write(header_bytes)
-        f.write(compressed_bitmask)
+        f.write(stored_bitmask)
         f.write(values_bytes)
         if metadata_bytes:
             f.write(metadata_bytes)
@@ -820,7 +826,8 @@ def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
 def write_qbt_columnar(output_path, bitmask_bytes, columns, leaf_count,
                        zoom, crs=4326, origin_x=0.0, origin_y=0.0,
                        extent_x=0.0, extent_y=0.0,
-                       fields=None, metadata=None, compress=True):
+                       fields=None, metadata=None, compress=True,
+                       compress_bitmask=True):
     """Fixed-entry columnar 모드 QBT 파일 생성.
 
     Args:
@@ -847,12 +854,13 @@ def write_qbt_columnar(output_path, bitmask_bytes, columns, leaf_count,
     flags = 0x3  # bit0=1 (fixed), bit1=1 (columnar)
     metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
 
-    header_bytes, compressed_bitmask, _ = _write_qbt_header(
+    header_bytes, stored_bitmask, _ = _write_qbt_header(
         bitmask_bytes, values_bytes, zoom, flags,
         crs, origin_x, origin_y, extent_x, extent_y,
-        0, fields, metadata_bytes)  # entry_size=0 for columnar
+        0, fields, metadata_bytes,
+        compress_bitmask=compress_bitmask)  # entry_size=0 for columnar
 
-    content = header_bytes + compressed_bitmask + values_bytes
+    content = header_bytes + stored_bitmask + values_bytes
     if metadata_bytes:
         content += metadata_bytes
 

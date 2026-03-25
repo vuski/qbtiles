@@ -31,7 +31,9 @@ Offset  Size  Type      Field              Description
 6       2     uint16    header_size        Total header bytes (≥128). Bitmask starts at this offset.
 8       4     uint32    flags              Bit 0: 0=variable, 1=fixed entry mode
                                            Bit 1: 0=row layout, 1=columnar layout
-                                           Bits 2–31: reserved (must be 0)
+                                           Bit 2: 0=bitmask gzip-compressed, 1=bitmask raw
+                                           Bits 3–31: reserved (must be 0)
+                                           Note: flags=0x2 (variable + columnar) is reserved.
 12      1     uint8     zoom               Quadtree depth (leaf zoom level)
 13      1     uint8     reserved           Must be 0
 14      2     uint16    crs                EPSG code. 0 = custom CRS (use origin/extent).
