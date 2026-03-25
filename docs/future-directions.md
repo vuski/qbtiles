@@ -154,6 +154,39 @@ For spatial data with per-cell Range Request access, existing vector formats off
 
 FlatGeobuf is the closest analogy — it supports bbox-based Range Requests to fetch individual features. However, for regular grids, storing explicit coordinates per cell is wasteful: 51M × 16 bytes (lon/lat doubles) = 800 MB of coordinates alone. QBTiles eliminates this entirely by encoding positions structurally in the bitmask tree.
 
+### Server-Side Deployment (Lambda / Worker)
+
+In serverless mode (client-only), QBTiles requires downloading the bitmask index (~8.7 MB) before the first query. For use cases with only 1–2 queries, COG's zero-initial-cost model may transfer fewer total bytes.
+
+Adding a server-side compute layer (Lambda, Cloudflare Worker, etc.) eliminates this trade-off entirely. The server holds the bitmask in memory and computes byte offsets on behalf of the client:
+
+```
+Client → Server:  bbox (tens of bytes)
+Server → Storage: Range Request for exact cells (KB)
+Server → Client:  values only (KB)
+```
+
+| | COG + Lambda | QBTiles + Lambda |
+|---|---|---|
+| Server → Storage traffic | 512×512 blocks (hundreds of KB) | **Exact cells only (KB)** |
+| Server CPU | LZW decode + crop | **Offset arithmetic only** |
+| Server memory | Block buffer per request | Bitmask 13 MB (resident) |
+| Client initial cost | 0 | **0** (index on server) |
+| Client query cost | Same | Same |
+
+The key difference is **server-to-storage traffic**: COG must fetch entire compressed blocks and decode them, even when only a few cells are needed. QBTiles computes `offset = leaf_index × value_size` and fetches exactly those bytes — no decompression, no wasted transfer.
+
+This means the per-cell advantage applies **twice**: once between storage and server, and again between server and client. For sparse regions (e.g., Sahara, ocean boundaries), the gap is dramatic — a query that needs 100 cells transfers ~400 bytes from storage with QBTiles vs ~512 KB with COG.
+
+### Initial Index Cost: Trade-off Summary
+
+| Deployment | QBTiles initial cost | Break-even vs COG |
+|---|---|---|
+| Client-only (serverless) | 8.7 MB bitmask download | ~18 queries |
+| Server-side (Lambda/Worker) | 0 (server holds index) | **1st query** |
+
+The bitmask is a one-time cost that amortizes over queries. In interactive exploration (dashboards, analysis tools), users typically issue dozens of queries per session, making the initial download worthwhile. For single-query APIs, server-side deployment eliminates the trade-off entirely.
+
 ---
 
 ## Time-Series with Roaring Bitmap
