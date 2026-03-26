@@ -153,8 +153,16 @@ __pycache__/
 
 # Demo
 demo-src/node_modules/
+demo-src/tiles/
+demo-src/src/pages/population/*.qbt.gz
 demo-src/tiles/*.data
 demo-src/tiles/*.gz
 demo-src/population/*.gz
 demo-src/range-request/*.gz
 docs/demo/
+
+# Temp/generated files
+_test.tif
+docs/SESSION_SUMMARY.md
+docs/examples/pop_korea_100m.qbt.gz
+docs/examples/sample.qbt

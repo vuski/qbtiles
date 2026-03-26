@@ -4,10 +4,10 @@
 
 QBTiles v1.0 is a unified binary format for spatially-indexed data. It supports two modes:
 
-- **Variable-entry mode** (`entry_size = 0`): Each entry has a different size. Includes offset/length arrays. For tile archives (MVT, PNG, etc.) — replaces PMTiles.
+- **Variable-entry mode** (`entry_size = 0`): Each entry has a different size. Includes offset/length arrays. Tile data is embedded in the same `.qbt` file. For tile archives (MVT, PNG, etc.) — replaces PMTiles.
 - **Fixed-entry mode** (`entry_size > 0`): All entries have the same byte size. No offset/length arrays needed. For raster grids, fixed-size records — replaces GeoTIFF for sparse data.
 
-Both modes share the same header, bitmask structure, and spatial indexing. A single parser handles both.
+Both modes share the same header, bitmask structure, and spatial indexing. A single parser handles both. All data is contained in a **single `.qbt` (or `.qbt.gz`) file** — index and data are never separated.
 
 ## File Structure
 
@@ -243,17 +243,17 @@ Each node's data byte length. Varint encoded. Nodes with `length == 0` are inter
 
 ### offsets[] (Delta Encoding)
 
-Each node's byte offset in the external data file:
+Each node's byte offset within the values section of the `.qbt` file:
 
 - Contiguous entries (`offset[i] == offset[i-1] + length[i-1]`): write `0`
 - Non-contiguous: write `offset[i] + 1`
 
-### Data File Access
+### Tile Data Access
 
-Use offset and length for HTTP Range Requests against a separate data file:
+Use `values_offset + offset` and `length` for HTTP Range Requests against the same `.qbt` file:
 
 ```
-Range: bytes={offset}-{offset + length - 1}
+Range: bytes={values_offset + offset}-{values_offset + offset + length - 1}
 ```
 
 ## 6. Metadata Section
@@ -302,21 +302,21 @@ Origin and extent define an arbitrary planar coordinate system. The application 
 ### Per-cell access (fixed mode)
 
 ```
-1. Download bitmask (can be served separately as .qbt.idx)
+1. Fetch header (128B), then bitmask section via Range Request
 2. BFS-expand bitmask to find target cell's leaf_index
 3. byte_offset = values_offset + leaf_index × entry_size
-4. HTTP Range Request for entry_size bytes
+4. HTTP Range Request for entry_size bytes from the same .qbt file
 ```
 
 ### Bounding-box query (fixed mode)
 
 ```
-1. Download bitmask
+1. Fetch header + bitmask from the .qbt file
 2. Convert bbox to row/col range at leaf zoom
 3. BFS-traverse bitmask, descend only into quadrants overlapping bbox
 4. Collect leaf indices of matching cells
 5. Merge adjacent indices into contiguous byte ranges
-6. Fetch merged ranges via Range Requests
+6. Fetch merged ranges via Range Requests from the same .qbt file
 ```
 
 Z-order (quadkey) sorting guarantees that spatially nearby cells have nearby leaf indices, producing few merged ranges for compact spatial queries.
@@ -324,10 +324,10 @@ Z-order (quadkey) sorting guarantees that spatially nearby cells have nearby lea
 ### Tile access (variable mode)
 
 ```
-1. Download and decompress index file (.qbt.idx.gz)
-2. Deserialize bitmask + varint arrays
-3. Look up tile by quadkey → offset + length
-4. Range Request to data file
+1. Fetch header (128B), then bitmask + varint section from the .qbt file
+2. Decompress and deserialize bitmask + varint arrays
+3. Look up tile by quadkey → offset + length (relative to values_offset)
+4. Range Request to the same .qbt file for tile data
 ```
 
 ## 9. File Extensions

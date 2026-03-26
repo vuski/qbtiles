@@ -1,5 +1,11 @@
 # Beyond Tile Indexing — QBTiles as a Data Container
 
+## From Tile Container to GeoTIFF Alternative
+
+QBTiles was originally developed as an alternative to PMTiles for time-series data where spatial extents remain consistent across periods — eliminating redundant index access. However, we realized that the bitmask's sequential arrangement can drastically reduce coordinate storage costs. This led to a further insight: if every tile's data occupies the same fixed storage size, the data index itself becomes unnecessary.
+
+Could QBTiles then replace single-band or multi-band storage formats like GeoTIFF? Thanks to its quadtree algorithm, QBTiles can skip data-free regions at coarse levels via parent bitmask bits. The sparser the data — global land cover, population grids — the more empty space can be skipped, making it more efficient than GeoTIFF.
+
 ## Smaller File, Finer Access
 
 Raster formats like GeoTIFF store data on a **full rectangular grid** — every pixel occupies space, even when it holds no data. For sparse datasets, most of that space is wasted on nodata values.
@@ -8,16 +14,15 @@ Consider the WorldPop 2025 global population grid at 1km resolution: 43,200 × 1
 
 QBTiles eliminates this waste entirely. The bitmask tree encodes *which* cells exist; only those cells have values stored. Empty space costs zero bytes.
 
-| Format | Size | Access granularity | Empty cell cost |
-|---|---|---|---|
-| GeoTIFF int32 deflate | 95 MB | 512×512 block | Compressed nodata values |
-| **QBTiles int32 gzip** | **51 MB** | **Per cell (4 bytes)** | **0 bytes** |
+The WorldPop 2025 Population Count data is 276 MB. Converting it to QBTiles yields 204 MB (74%).
 
-This is **46% smaller with 131,072× finer access granularity** — under the same conditions (int32, lossless). These two properties are normally a trade-off: finer access usually requires more metadata overhead, increasing file size. QBTiles achieves both because the bitmask that eliminates empty-cell storage *also* serves as a spatial index for per-cell addressing.
+Despite being smaller, access via Range Request is possible at the **single-cell level**. Unlike GeoTIFF which accesses data in 512×512 pixel blocks, QBTiles downloads a compressed 8.7 MB bitmask index into memory once, then requests and receives data per cell with zero wasted traffic. Splitting a rectangular region into contiguous byte ranges does increase the number of requests, but in typical client environments where requests are sent concurrently, total response time is faster. In sparse regions, download volume can be less than 1/10 that of GeoTIFF.
+
+Cloud-optimized file formats — those supporting Range Requests — normally face a trade-off between file size and access granularity: finer access requires more metadata overhead, increasing file size. QBTiles achieves both because the bitmask that eliminates empty-cell storage *simultaneously* serves as a spatial index for per-cell addressing.
 
 > **Raster formats pay for empty space. QBTiles doesn't.**
 
-The sparser the data, the greater the advantage. At 6.9% occupancy (global population), the reduction is 46%. For sparser datasets — urban footprints, sensor networks, species observations — the gap grows dramatically.
+The sparser the data, the greater the advantage. In sparsely populated regions like Africa, partial extraction can require less than 1/10 the download volume.
 
 ---
 
@@ -25,77 +30,65 @@ The sparser the data, the greater the advantage. At 6.9% occupancy (global popul
 
 ### WorldPop Benchmark (51M cells)
 
-51,297,957 valid cells out of 746,496,000 total (6.9% occupancy).
+- 51,297,957 valid cells out of 746 million total (6.9% occupancy)
 
-**Bitmask breakdown:**
+Comparing a raster format like GeoTIFF — which must fill in empty space — against QBTiles which stores only valid cells might seem unfair. So we also converted to GeoParquet and other formats for comparison.
 
-| Section | Raw | Gzip |
-|---|---|---|
-| Bitmask | 12.7 MB | 8.7 MB |
-| Values (int32) | 231.3 MB | 42.1 MB |
-| Total | 244.0 MB | 50.8 MB |
+| Format                   | Size       | Ratio    | Partial access     | Access unit                  |
+| ------------------------ | ---------- | -------- | ------------------ | ---------------------------- |
+| FlatGeobuf               | 6,001 MB   | 29.4x    | Range Request      | per feature (~40+ bytes)     |
+| GeoParquet               | 700 MB     | 3.4x     | full download only | row group (engine-dependent) |
+| Parquet float32 (snappy) | 312 MB     | 1.5x     | full download only | -                            |
+| Parquet float32 (gzip)   | 284 MB     | 1.4x     | full download only | -                            |
+| GeoTIFF float32 (COG)    | 276 MB     | 1.4x     | Range Request      | 512×512 block                |
+| **QBTiles float32**      | **204 MB** | **1.0x** | **Range Request**  | **per cell (4 bytes)**       |
 
-Bitmask overhead: 5.2% of raw, ~17.2% of gzip.
+Across all formats, QBTiles is the smallest. It also offers the flexibility of per-cell Range Request access.
 
-**Format comparison (int32, lossless):**
-
-| Format | Size |
-|---|---|
-| GeoParquet | 549 MB |
-| GeoParquet + zip | 311 MB |
-| GeoTIFF float32 (original COG) | 277 MB |
-| Parquet (lon/lat/pop) | 165 MB |
-| Parquet + zip | 130 MB |
-| GeoTIFF int32 deflate | 95 MB |
-| Values only int32 gzip | 57 MB |
-| **QBTiles int32 gzip** | **51 MB** |
-
-### Float32 vs Int32 Compression
-
-| Type | Raw | Gzip | Ratio |
-|---|---|---|---|
-| float32 | 196 MB | 184 MB | 93.8% |
-| int32 (rounded) | 196 MB | 57 MB | 29.2% |
-
-Float32 bit patterns are too irregular for gzip to compress effectively. Integer rounding enables 3.2× better compression.
+The Python `qbtiles` library provides a function to convert GeoTIFF to QBTiles, so you can test and compare directly.
 
 ### Comparison with Vector Formats
 
-For spatial data with per-cell Range Request access, existing vector formats offer partial solutions:
+In this sample, the total QBTiles file is 204 MB — comprising a header under 140 bytes, 9 MB of compressed index, and 195 MB of uncompressed float32 contiguous data. Below is a comparison with similar vector formats.
 
-| | QBTiles | FlatGeobuf | GeoParquet |
-|---|---|---|---|
-| Spatial index | Bitmask tree (8.7 MB / 51M cells) | R-tree (tens of MB / 51M) | Row group metadata |
-| Access granularity | Per cell (4 bytes) | Per feature (~40+ bytes) | Per row group (thousands of rows) |
-| ID/coordinate storage | 0 (tree implies position) | lon/lat per feature (16 bytes) | lon/lat per row (16 bytes) |
-| 51M cells storage | Index 8.7 MB + values 196 MB | ~1.6 GB+ (coords + attributes) | ~165 MB (Parquet compression) |
-| Best for | Regular grids | Irregular vector features | Tabular analytics |
+For spatial data with per-cell Range Request access, existing vector formats offer only partial solutions:
+
+|                       | QBTiles                           | FlatGeobuf                     | GeoParquet                        |
+| --------------------- | --------------------------------- | ------------------------------ | --------------------------------- |
+| Spatial index         | Bitmask tree (8.7 MB / 51M cells) | R-tree (tens of MB / 51M)      | Row group metadata                |
+| Access granularity    | Per cell (4 bytes)                | Per feature (~40+ bytes)       | Per row group (thousands of rows) |
+| ID/coordinate storage | 0 (tree implies position)         | lon/lat per feature (16 bytes) | lon/lat per row (16 bytes)        |
+| 51M cells storage     | 204 MB                            | 6,001 MB                       | 700 MB                            |
+| Best for              | Regular grids                     | Irregular vector features      | Tabular analytics                 |
+
+FlatGeobuf is optimized for irregular vector features. For 51M regular grid points, the per-feature R-tree index entry + FlatBuffers wrapper overhead (~98 bytes/feature) dominates, resulting in an abnormally large file. FlatGeobuf shows reasonable sizes for irregular vector data.
 
 FlatGeobuf is the closest analogy — it supports bbox-based Range Requests to fetch individual features. However, for regular grids, storing explicit coordinates per cell is wasteful: 51M × 16 bytes (lon/lat doubles) = 800 MB of coordinates alone.
 
 ---
 
-## Partial Access via Range Request
+## Cloud Optimized Format: Partial Access via Range Request
 
 The bitmask structure supports partial access patterns similar to Cloud Optimized GeoTIFF (COG), but at per-cell resolution rather than per-block.
 
 A client can:
 
 1. Download only the bitmask (8.7 MB gzip for 51M cells) — once
-2. Compute the exact byte offset of any cell: `offset = leaf_index × 4`
+2. Compute the exact byte offset of any cell: offset = leaf_index × 4
 3. Fetch only the needed cells via HTTP Range Request
 
-### Three Access Strategies
+If 8.7 MB feels like too much initial overhead, the index size can be reduced: trimming the bitmask by 2–3 levels while increasing the access unit to 4×4 or 8×8 cells. This wastes slightly more space but proportionally reduces initial loading. Such trade-offs are achievable with the current QBTiles specification and API.
 
-| Strategy | Initial download | Access granularity |
-|---|---|---|
-| Full download | 51 MB (gzip) | Instant client-side access |
-| Bitmask only | 8.7 MB | Per-cell Range Request |
-| Level 7 bitmask + lengths | ~hundreds of KB | 512×512 block Range Request |
+### Two Access Strategies by File Size
+
+| Strategy      | Initial download | Access granularity         |
+| ------------- | ---------------- | -------------------------- |
+| Full download | 51 MB (gzip)     | Instant client-side access |
+| Bitmask only  | 8.7 MB           | Per-cell Range Request     |
 
 #### Strategy 1: Full download
 
-Download the entire gzip file, decompress, build lookup. Best when the client needs to explore the full dataset interactively.
+If data is stored as integers, spatial autocorrelation causes similar values to be arranged sequentially, yielding good compression ratios. Even a global-scale full file download becomes manageable — WorldPop global population rounded to integers compresses to just 51 MB. Download the entire gzip file, decompress, and build a lookup table. Best when the client needs to explore the full dataset interactively.
 
 #### Strategy 2: Bitmask-first (current — [live demo](https://vuski.github.io/qbtiles/demo/range-request/))
 
@@ -106,34 +99,26 @@ offset = data_section_start + leaf_index × value_size
 ```
 
 File layout:
+
 ```
 [bitmask section: 12.7 MB raw, 8.7 MB gzip]  ← download once
 [value section: 196 MB, float32 × 51M]        ← Range Request per cell
 ```
 
-#### Strategy 3: Two-level index
+### Request Count vs Transfer Size Trade-off in the Cloud
 
-Download only the top levels (e.g., Level 0–7) of the bitmask plus a length table for each Level 7 node. Since zoom 16 - zoom 7 = 9 levels = 512×512 blocks, this mirrors COG's tile structure.
+Consider placing data files on a cloud or remote server and making Range Requests for rectangular regions. Splitting the rectangle into contiguous byte ranges increases the number of requests somewhat, but since only the needed data is transferred, total download volume can drop to 33%.
 
-```
-[Level 0–7 bitmask + per-node leaf counts]  ← ~hundreds of KB, first request
-[value section]                              ← Range Request per 512×512 block
-```
+Example: South Korea, ~2° × 2° selection:
 
-This is structurally equivalent to COG's TileOffsets table, but the tile IDs are implicit in the bitmask rather than stored explicitly.
-
-### Request Count vs Transfer Size Trade-off
-
-A real-world comparison for a ~2° × 2° selection over South Korea:
-
-| | QBTiles | COG |
-|---|---|---|
-| Requests | 7 | 2 |
-| Bytes | 23.1 KB | 768 KB |
-| Cells retrieved | 4,576 | 76,989 |
+|                    | QBTiles            | COG               |
+| ------------------ | ------------------ | ----------------- |
+| Requests           | 7                  | 2                 |
+| Bytes              | 23.1 KB            | 768 KB            |
+| Cells retrieved    | 4,576              | 76,989            |
 | Access granularity | Per cell (4 bytes) | Per 512×512 block |
 
-COG transfers **33× more data** with fewer requests. Which matters more?
+COG has fewer requests, but transfers **33× more data**. This slight trade-off may influence the final choice depending on the user's deployment environment.
 
 **Request overhead in practice:**
 
@@ -162,46 +147,43 @@ QBTiles' `mergeRanges` (gap ≤ 256 indices → merge) balances this: nearby cel
 
 ---
 
-## Deployment
+## Eliminating Initial Index Cost with Cloud Workers
 
 ### Server-Side (Lambda / Worker)
 
-In client-only mode, QBTiles requires downloading the bitmask index (~8.7 MB) before the first query. For use cases with only 1–2 queries, COG's zero-initial-cost model may transfer fewer total bytes.
+Adding a server-side compute layer (Lambda, Cloudflare Worker, etc.) eliminates the client's initial index download entirely — removing QBTiles' only disadvantage.
 
-Adding a server-side compute layer (Lambda, Cloudflare Worker, etc.) eliminates this trade-off. The server holds the bitmask in memory and computes byte offsets on behalf of the client:
+In client-only mode, QBTiles requires downloading the bitmask index (~8.7 MB) before the first query. For use cases where a user connects, sends 1–2 queries, and leaves, COG's zero-initial-cost model may transfer fewer total bytes.
+
+However, routing through AWS Lambda or Cloudflare Workers changes the equation. When the server holds the bitmask in memory and computes byte offsets on behalf of the client, the client-side QBTiles experience has virtually no drawbacks.
 
 ```
-Client → Server:  bbox (tens of bytes)
+Client → Server:  bbox request (with 10+ requests per single region query being common)
+      vs
 Server → Storage: Range Request for exact cells (KB)
-Server → Client:  values only (KB)
+Server → Client:  single bbox request, receive values only (KB)
 ```
 
-| | COG + Lambda | QBTiles + Lambda |
-|---|---|---|
-| Server → Storage traffic | 512×512 blocks (hundreds of KB) | **Exact cells only (KB)** |
-| Server CPU | LZW decode + crop | **Offset arithmetic only** |
-| Server memory | Block buffer per request | Bitmask 13 MB (resident) |
-| Client initial cost | 0 | **0** (index on server) |
-| Client query cost | Same | Same |
+The per-cell advantage applies twice.
 
-The per-cell advantage applies twice: once between storage and server, and again between server and client. For sparse regions (e.g., Sahara, ocean boundaries), the gap is dramatic — a query that needs 100 cells transfers ~400 bytes from storage with QBTiles vs ~512 KB with COG.
+The initial index cost between storage (S3, R2) and server (Lambda, Worker) is negligible — even with many clients, 8.7 MB is transferred only once. And since ongoing queries also transfer less data, internal network traffic benefits as well.
+
+Between server and client, likewise: no initial index download is needed. In nearly all cases, less data than COG travels across the network. In sparse regions (e.g., Sahara, coastal boundaries), the gap becomes dramatic — a query needing 100 valid cells transfers ~400 bytes from storage with QBTiles, while COG may transfer ~512 KB.
 
 ### Initial Index Cost
 
-| Deployment | QBTiles initial cost | Break-even vs COG |
-|---|---|---|
-| Client-only (serverless) | 8.7 MB bitmask download | ~18 queries |
-| Server-side (Lambda/Worker) | 0 (server holds index) | **1st query** |
-
-The bitmask is a one-time cost that amortizes over queries. In interactive exploration (dashboards, analysis tools), users typically issue dozens of queries per session, making the initial download worthwhile. For single-query APIs, server-side deployment eliminates the trade-off entirely.
+| Deployment                  | QBTiles initial cost      | Break-even vs COG |
+| --------------------------- | ------------------------- | ----------------- |
+| Client-only (serverless)    | 8.7 MB bitmask download   | ~10 queries       |
+| Server-side (Lambda/Worker) | 0 (server holds index)    | **1st query**     |
 
 ---
 
-## Advanced Patterns
+# Binary Search Algorithm: Additional Benefits of the Bitmask
 
 The quadkey-sorted structure enables capabilities beyond basic data retrieval.
 
-### Spatial Range Query via Quadkey Prefix
+## Spatial Range Query via Quadkey Prefix
 
 Decoded QBTiles entries are sorted by quadkey (Z-order curve), which preserves spatial hierarchy. A subregion query reduces to binary search on a sorted array:
 
@@ -216,33 +198,21 @@ i_end = np.searchsorted(qk_arr, qk_max, side='right')
 
 This is **O(log N)** — compared to O(N) for coordinate-based filtering. Hilbert-curve-based tile IDs (PMTiles) do not share prefixes across zoom levels, so this contiguous-range property is unique to quadkey/Z-order encoding.
 
-### Client-Side Spatial Analysis
+## Lightweight Client-Side Spatial Analysis Format
 
 Like DuckDB operating on Parquet files locally, QBTiles can serve as a lightweight spatial analysis format for client-side computation. Once downloaded, the decoded arrays support fast spatial operations without a server.
 
-**Measured: WorldPop global 1km population (51M cells, rounded to int32)**
+**Measured: South Korea 100m population grid (930K cells × 3 values: total, male, female)**
 
-| | Parquet (lon/lat/pop) | QBTiles |
-|---|---|---|
-| Download | 165 MB | **51 MB** |
-| Spatial query | O(N) coordinate scan | **O(log N) searchsorted on quadkey** |
-| Runtime | Requires DuckDB/WASM (~5 MB) | Native arrays, no dependency |
+|               | Parquet (x/y + 3 values, gzip) | QBTiles columnar (gzip)              |
+| ------------- | ------------------------------ | ------------------------------------ |
+| Download      | 2.9 MB                         | **1.7 MB**                           |
+| Spatial query | O(N) coordinate scan           | **O(log N) searchsorted on quadkey** |
+| Runtime       | Requires DuckDB/WASM (~5 MB)   | Native arrays, no dependency         |
 
-The key advantages for client-side use:
+Key advantages for client-side use:
 
-1. **Smaller download**: 165 MB → 51 MB for the same data
+1. **Smaller download**: 2.9 MB → 1.7 MB for the same data (1.7× smaller)
 2. **Built-in spatial index**: Quadkey sorting enables O(log N) range queries without building a secondary index
-3. **Zero dependency**: Decoded data is just sorted arrays — works with numpy, plain JavaScript TypedArrays, or any language
 
-### Time-Series with Roaring Bitmap
-
-When time-series data shares similar but not identical spatial extents (e.g., global population across years where measurement boundaries change), a union bitmask can be combined with per-year Roaring Bitmaps:
-
-```
-Shared:   QBTiles bitmask (union of all years → quadkey array)
-Per-year: Roaring Bitmap (valid cell indices) + value array (valid cells only)
-```
-
-This avoids zero-padding for missing cells while maintaining the shared spatial index. Roaring Bitmaps compress contiguous integer ranges extremely well, making the per-year overhead minimal.
-
-Trade-off: adds a JavaScript dependency (e.g., roaring-wasm) and implementation complexity. For time-series where valid cells are nearly identical across years, simple zero-padding with gzip may be sufficient.
+Of course, for smaller datasets, Parquet's linear scan may be faster — linear scans simply advance byte-by-byte or bit-by-bit, while binary search requires conditional branching. The exact break-even point requires further experimentation.

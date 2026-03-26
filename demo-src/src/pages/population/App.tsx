@@ -3,19 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { MapShell } from '../../components/MapShell';
 import { InfoPanel } from '../../components/InfoPanel';
 import { ColumnLayer } from '@deck.gl/layers';
-import proj4 from 'proj4';
-import {
-  parseQBTHeader,
-  deserializeBitmaskIndex,
-  readColumnarValues,
-} from 'qbtiles';
+import { openQBT, type QBT } from 'qbtiles';
 
 const DATA_URL = './korea_pop_100m.qbt.gz';
-
-// EPSG:5179 (Korean 2000 / Central Belt 2010) — pre-create converter once
-const EPSG5179 =
-  '+proj=tmerc +lat_0=38 +lon_0=127.5 +k=0.9996 +x_0=1000000 +y_0=2000000 +ellps=GRS80 +units=m +no_defs';
-const toWGS84 = proj4(EPSG5179, 'EPSG:4326');
 
 type Mode = 'total' | 'male' | 'female';
 
@@ -48,73 +38,34 @@ function App() {
     (async () => {
       const t0 = performance.now();
 
-      setLoadStatus('Downloading...');
-      const res = await fetch(DATA_URL);
-      const compressed = await res.arrayBuffer();
-      const cl = res.headers.get('Content-Length');
-      setFileSize(cl ? parseInt(cl) : compressed.byteLength);
+      const qbt = await openQBT(DATA_URL, (msg) => setLoadStatus(msg));
 
-      setLoadStatus('Decompressing...');
-      const bytes = new Uint8Array(compressed);
-      let buffer: ArrayBuffer;
-      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
-        const ds = new DecompressionStream('gzip');
-        const writer = ds.writable.getWriter();
-        writer.write(bytes);
-        writer.close();
-        buffer = await new Response(ds.readable).arrayBuffer();
-      } else {
-        buffer = compressed;
-      }
+      // Get columns
+      const totals = qbt.columns!.get('total')!;
+      const males = qbt.columns!.get('male')!;
+      const females = qbt.columns!.get('female')!;
 
-      setLoadStatus('Parsing header...');
-      await new Promise((r) => setTimeout(r, 0));
-      const header = parseQBTHeader(buffer);
-
-      setLoadStatus('Decompressing bitmask...');
-      await new Promise((r) => setTimeout(r, 0));
-      const bitmaskCompressed = new Uint8Array(buffer, header.headerSize, header.bitmaskLength);
-      let bitmaskBuf: ArrayBuffer;
-      if (bitmaskCompressed[0] === 0x1f && bitmaskCompressed[1] === 0x8b) {
-        const ds2 = new DecompressionStream('gzip');
-        const w2 = ds2.writable.getWriter();
-        w2.write(bitmaskCompressed);
-        w2.close();
-        bitmaskBuf = await new Response(ds2.readable).arrayBuffer();
-      } else {
-        bitmaskBuf = bitmaskCompressed.buffer.slice(header.headerSize, header.headerSize + header.bitmaskLength);
-      }
-
-      setLoadStatus('Building index...');
-      await new Promise((r) => setTimeout(r, 0));
-      const index = await deserializeBitmaskIndex(
-        bitmaskBuf, header.zoom,
-        (msg) => setLoadStatus(msg),
-        { bitmaskByteLength: bitmaskBuf.byteLength, bufferOffset: 0 },
-      );
-
-      setLoadStatus('Reading values...');
-      await new Promise((r) => setTimeout(r, 0));
-      const columns = readColumnarValues(buffer, header, index.totalLeaves);
-      const totals = columns.get('total')!;
-      const males = columns.get('male')!;
-      const females = columns.get('female')!;
-
-      // BFS expand bitmask to get quadkeys for coordinate conversion
       setLoadStatus('Converting coordinates...');
       await new Promise((r) => setTimeout(r, 0));
 
-      // Walk the tree to get row/col for each leaf, then convert to WGS84
-      const { nibbles, childStart } = index;
+      // Walk the bitmask tree to get (row, col) for each leaf → convert to WGS84
+      // Use getCellBBox for coordinate conversion (handles CRS automatically)
+      const zoom = qbt.header.zoom;
+      const tileSize = qbt.header.extentX / (1 << zoom);
       const result: CellData[] = [];
-      const CHUNK = 50000;
+
+      // DFS to enumerate leaves in BFS order and get their (row, col)
+      // Access internal bitmask index for tree traversal
+      const index = (qbt as any)._bitmaskIndex;
+      const { nibbles, childStart } = index;
+      const leafCoords: [number, number][] = new Array(qbt.leafCount);
       let leafIdx = 0;
 
-      // Iterative BFS to recover (row, col) for each leaf
-      const leafCoords: [number, number][] = new Array(index.totalLeaves); // [row, col]
+      function popcount4(n: number): number {
+        return ((n >> 3) & 1) + ((n >> 2) & 1) + ((n >> 1) & 1) + (n & 1);
+      }
 
-      // DFS to enumerate leaves in order
-      function dfs(nodeIdx: number, row: number, col: number, zoom: number) {
+      function dfs(nodeIdx: number, row: number, col: number) {
         const mask = nibbles[nodeIdx];
         const firstChild = childStart[nodeIdx];
         let ord = 0;
@@ -124,38 +75,29 @@ function App() {
           const childCol = (col << 1) | (i & 1);
           const ci = firstChild + ord;
           ord++;
-          if (ci < nibbles.length && nibbles[ci] !== undefined && popcount4(nibbles[ci]) > 0) {
-            dfs(ci, childRow, childCol, zoom + 1);
+          if (ci < nibbles.length && popcount4(nibbles[ci]) > 0) {
+            dfs(ci, childRow, childCol);
           } else {
             leafCoords[leafIdx++] = [childRow, childCol];
           }
         }
       }
 
-      function popcount4(n: number): number {
-        return ((n >> 3) & 1) + ((n >> 2) & 1) + ((n >> 1) & 1) + (n & 1);
-      }
+      dfs(0, 0, 0);
 
-      dfs(0, 0, 0, 0);
-
-      // Convert leaf (row, col) → custom CRS center → WGS84
-      const originX = header.originX;
-      const originY = header.originY;
-      const extent = header.extentX;
-      const zoom = header.zoom;
-      const tileSize = extent / (1 << zoom);
-
-      for (let start = 0; start < index.totalLeaves; start += CHUNK) {
-        const end = Math.min(start + CHUNK, index.totalLeaves);
+      // Convert (row, col) → native CRS center → WGS84
+      const CHUNK = 50000;
+      for (let start = 0; start < qbt.leafCount; start += CHUNK) {
+        const end = Math.min(start + CHUNK, qbt.leafCount);
         if (start > 0) {
-          setLoadStatus(`Converting coords ${start.toLocaleString()} / ${index.totalLeaves.toLocaleString()}...`);
+          setLoadStatus(`Converting coords ${start.toLocaleString()} / ${qbt.leafCount.toLocaleString()}...`);
           await new Promise((r) => setTimeout(r, 0));
         }
         for (let i = start; i < end; i++) {
           const [row, col] = leafCoords[i];
-          const cx = originX + col * tileSize + tileSize / 2;
-          const cy = originY + row * tileSize + tileSize / 2;
-          const [lng, lat] = toWGS84.forward([cx, cy]);
+          const cx = qbt.header.originX + col * tileSize + tileSize / 2;
+          const cy = qbt.header.originY + row * tileSize + tileSize / 2;
+          const [lng, lat] = qbt.toWGS84(cx, cy);
           result.push({
             position: [lng, lat],
             total: totals[i],
@@ -192,7 +134,7 @@ function App() {
         extruded: true,
         pickable: true,
         autoHighlight: true,
-        highlightColor: [255, 255, 255, 180],
+        highlightColor: [255, 255, 180, 180],
         onHover: (info: any) => {
           if (info.object) {
             setTooltip({ x: info.x, y: info.y, data: info.object });
@@ -242,7 +184,6 @@ function App() {
         ) : (
           <div style={{ margin: '8px 0 0', fontSize: 13 }}>
             <div>Cells: {cells.length.toLocaleString()}</div>
-            <div>File: {fmt(fileSize)}</div>
             <div>Per cell: {cells.length > 0 ? (fileSize / cells.length).toFixed(2) : '-'} Byte (coords + 3 values)</div>
             <div>Load: {(loadTime / 1000).toFixed(1)}s</div>
             <div style={{ marginTop: 8, display: 'flex', gap: 4 }}>

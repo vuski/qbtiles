@@ -40,121 +40,80 @@ Level 3:  [0010]          → only child 2 exists
 
 | Dataset | Entries | PMTiles | QBTiles | Reduction |
 |---|---|---|---|---|
-| adm-korea | 36K rows | 80.9 KB | 61.3 KB | **-24.3%** |
-| Full OSM | 160M rows | 300.7 MB | 235.2 MB | **-21.8%** |
+| adm-korea | 36K | 80.9 KB | 61.3 KB | **-24.3%** |
+| Full OSM | 160M | 300.7 MB | 235.2 MB | **-21.8%** |
 
-### Fixed row — Raster Grid (vs COG)
+### Fixed row — Raster Grid (WorldPop 51M cells, float32)
 
-WorldPop 1km global population, 51M cells, float32:
+| Format | Size | Ratio | Per-cell access |
+|---|---|---|---|
+| FlatGeobuf | 6,001 MB | 29.4x | per feature |
+| GeoParquet | 700 MB | 3.4x | full download only |
+| GeoTIFF (COG) | 276 MB | 1.4x | 512×512 block |
+| **QBTiles** | **204 MB** | **1.0x** | **single cell** |
 
-| Format | Size | Per-cell access |
-|---|---|---|
-| COG (GeoTIFF) | 290 MB | 512×512 block |
-| **QBTiles fixed row** | **204 MB** | **Single cell** |
-
-### Fixed columnar — Compressed Grid (vs Parquet)
-
-Korea 100m population, 931K cells × 3 values:
+### Fixed columnar — Compressed Grid (Korea 100m, 931K cells × 3 values)
 
 | Format | Size | Per cell |
 |---|---|---|
-| GeoParquet | ~20 MB | 21+ Byte |
-| Parquet + zip | 3.6 MB | 3.9 Byte |
-| **QBTiles columnar** | **1.75 MB** | **1.97 Byte** |
+| Parquet (gzip) | 2.9 MB | coordinate scan |
+| **QBTiles columnar** | **1.7 MB** | **O(log N) quadkey search** |
 
 ## Quick Start
 
-### Python — Write a QBT File
+### Python — Build QBT Files
 
 ```python
 import qbtiles as qbt
-import struct
 
-# 1. Build quadtree from z/x/y tile coordinates
-#    entries: [(quadkey_int64, filepath, byte_offset, byte_length, run_length), ...]
-entries = [
-    (qbt.tile_to_quadkey_int64(5, 27, 12), "tiles/5/27/12.mvt", 0, 4820, 1),
-    (qbt.tile_to_quadkey_int64(5, 27, 13), "tiles/5/27/13.mvt", 4820, 3210, 1),
-    # ...
-]
-root = qbt.build_quadtree(entries)
+# Mode 1: Tile archive — from a folder of z/x/y tiles (e.g., tiles/5/27/12.mvt)
+qbt.build("korea_tiles.qbt", folder="tiles/")
 
-# 2. Serialize bitmask
-bitmask, leaf_count = qbt.serialize_bitmask(root)
+# Mode 2: Columnar — coordinates + multiple value columns
+# coords: list of (x, y) in the target CRS
+# columns: dict of column_name → value list (same length as coords)
+# cell_size: grid cell size in CRS units (meters for EPSG:5179)
+# → zoom, origin, extent are auto-calculated from coords and cell_size
+qbt.build("population.qbt.gz",
+    coords=list(zip(df["x"], df["y"])),         # [(950000, 1950000), ...]
+    columns={"total": totals, "male": males, "female": females},
+    cell_size=100, crs=5179)                     # 100m grid, Korean CRS
 
-# 3a. Fixed row — one float32 value per cell (for Range Request)
-#     values_bytes: leaf_count × entry_size bytes, same order as bitmask leaves
-values = [52.3, 41.2, 0.0, 31.8]  # population per cell
-values_bytes = struct.pack(f"<{leaf_count}f", *values)
+# Mode 3: Fixed row — coordinates + single value array (for Range Request)
+# values: flat list of numbers (one per cell)
+# entry_size: bytes per cell (4 for float32)
+qbt.build("global_pop.qbt",
+    coords=list(zip(lons, lats)),                # [(-73.99, 40.75), ...]
+    values=population,                           # [52.3, 41.2, ...]
+    cell_size=1000, entry_size=4,                # 1km grid, 4 bytes/cell
+    fields=[{"type": qbt.TYPE_FLOAT32, "name": "pop"}])
 
-qbt.write_qbt_fixed("population.qbt", bitmask, values_bytes,
-    zoom=16, crs=4326,
-    origin_x=-180.0, origin_y=84.0, extent_x=360.0, extent_y=144.0,
-    entry_size=4,
-    fields=[{"type": qbt.TYPE_FLOAT32, "offset": 0, "name": "population"}])
-
-# 3b. Columnar — multiple varint columns (gzip-compressed whole file)
-#     Each list has leaf_count elements in bitmask leaf order
-totals  = [523, 412, 0, 318]   # total population per cell
-males   = [261, 205, 0, 159]   # male population per cell
-females = [262, 207, 0, 159]   # female population per cell
-
-qbt.write_qbt_columnar("population.qbt.gz", bitmask,
-    columns=[(qbt.TYPE_VARINT, totals), (qbt.TYPE_VARINT, males), (qbt.TYPE_VARINT, females)],
-    leaf_count=leaf_count, zoom=13, crs=5179,
-    origin_x=700000.0, origin_y=1300000.0, extent_x=819200.0, extent_y=819200.0,
-    fields=[
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "total"},
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "male"},
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "female"},
-    ])
-
-# Read back header
-header = qbt.read_qbt_header("population.qbt")
-# header['zoom'], header['fields'], header['index_hash'], ...
+# GeoTIFF → QBTiles conversion (cell_size, CRS, extent auto-detected)
+qbt.build("worldpop.qbt", geotiff="worldpop_2025.tif")
 ```
 
-### TypeScript — Read & Query (Fixed Row, Range Request)
+### TypeScript — Read & Query
 
 ```typescript
-import { loadQBT, queryBbox, mergeRanges, fetchRanges } from 'qbtiles';
+import { openQBT } from 'qbtiles';
 
-const url = 'https://example.com/population.qbt';
+// openQBT reads the header, detects the mode, and loads data automatically.
 
-// Load index (fetches 128B header + bitmask, hash-cached)
-const { header, index } = await loadQBT(url);
+// Mode 1: Tile archive — serve MVT/PNG tiles from a single .qbt file
+const tiles = await openQBT('korea_tiles.qbt');
+const tile = await tiles.getTile(7, 109, 49);  // ArrayBuffer (gzip MVT) | null
+tiles.addProtocol(maplibregl, 'qbt');           // one-line MapLibre integration
 
-// Spatial query → fetch only matching cells via Range Request
-const grid = { zoom: 16, originLon: -180, originLat: 84, pixelDeg: 1/120, rasterCols: 43200, rasterRows: 17280 };
-const result = queryBbox(index, [126.8, 37.4, 127.2, 37.7], grid);
-const ranges = mergeRanges(result.leafIndices, 256, header.entrySize);
-const { values } = await fetchRanges(url, ranges, undefined, undefined, header.valuesOffset);
-// values.get(leafIndex) → population value
-```
+// Mode 3: Fixed row — per-cell Range Request on a remote file
+const grid = await openQBT('https://cdn.example.com/global_pop.qbt');
+const cells = await grid.query([126, 35, 128, 37]);  // [west, south, east, north]
+// → Array<{ position: [lng, lat], value: number }>
 
-### TypeScript — Read Columnar (Whole File)
-
-```typescript
-import { parseQBTHeader, deserializeBitmaskIndex, readColumnarValues } from 'qbtiles';
-
-// Fetch and decompress .qbt.gz
-const res = await fetch('https://example.com/population.qbt.gz');
-const compressed = await res.arrayBuffer();
-const ds = new DecompressionStream('gzip');
-const writer = ds.writable.getWriter();
-writer.write(new Uint8Array(compressed));
-writer.close();
-const buffer = await new Response(ds.readable).arrayBuffer();
-
-// Parse header → build index → read columnar values
-const header = parseQBTHeader(buffer);
-const index = await deserializeBitmaskIndex(buffer, header.zoom, undefined,
-  { bitmaskByteLength: header.bitmaskLength, bufferOffset: header.headerSize });
-const columns = readColumnarValues(buffer, header, index.totalLeaves);
-// columns: Map<string, number[]> — field name → values in BFS leaf order
-// columns.get('total')  → [523, 412, 0, 318, ...]  (931,495 cells)
-// columns.get('male')   → [261, 205, 0, 159, ...]
-// columns.get('female') → [262, 207, 0, 159, ...]
+// Mode 2: Columnar — downloads entire file, queries in memory
+const pop = await openQBT('population.qbt.gz');
+pop.columns!.get('total')!;                     // number[931495] — direct access
+const result = await pop.query([126, 35, 128, 37]);
+// → Array<{ position: [lng, lat], values: {total: 523, male: 261, female: 262} }>
 ```
 
 ## File Format (v1)
@@ -171,39 +130,29 @@ Full spec: [format-spec.md](docs/format-spec.md)
 
 ## API Reference
 
-### Python (`pip install qbtiles`)
-
-Also available as npm package for browser-side reading.
+### Python (`pip install qbtiles`) — Writer
 
 | Function | Description |
 |----------|-------------|
-| `build_quadtree(entries)` | Build quadtree from `(qk_int64, path, offset, length, run_length)` list |
-| `serialize_bitmask(root)` | BFS serialize to `(bitmask_bytes, leaf_count)` |
-| `write_qbt_fixed(path, bitmask, values, ...)` | Write fixed-entry row-mode QBT file |
-| `write_qbt_columnar(path, bitmask, columns, ...)` | Write fixed-entry columnar QBT file |
-| `write_qbt_variable(path, root, ...)` | Write variable-entry QBT file (tile archive) |
+| `build(output, ...)` | Unified builder — auto-detects mode from `folder` / `columns` / `values` / `geotiff` |
 | `read_qbt_header(path_or_bytes)` | Parse QBT header to dict |
 | `tile_to_quadkey_int64(z, x, y)` | Tile coords → 64-bit quadkey |
-| `encode_custom_quadkey(x, y, zoom, ...)` | Custom CRS coord → quadkey |
-| `decode_custom_quadkey(qk, zoom, ...)` | Quadkey → custom CRS center |
-| `build_archive(folder, idx_path, data_path)` | Build tile archive from z/x/y folder |
 
-### TypeScript/JavaScript (`npm install qbtiles`)
+Low-level: `build_quadtree()`, `serialize_bitmask()`, `write_qbt_variable()`, `write_qbt_fixed()`, `write_qbt_columnar()`
 
-Also available as pip package for file creation.
+### TypeScript/JavaScript (`npm install qbtiles`) — Reader
 
-| Function | Description |
+| Function / Class | Description |
 |----------|-------------|
-| `loadQBT(url, onProgress?)` | Fetch header + bitmask, hash-cached index |
-| `parseQBTHeader(buffer)` | Parse QBT header from ArrayBuffer |
-| `deserializeBitmaskIndex(buffer, zoom, ...)` | Build lazy tree index from bitmask |
-| `queryBbox(index, bbox, grid)` | Spatial query → leaf indices |
-| `mergeRanges(indices, maxGap, entrySize)` | Merge indices into byte ranges |
-| `fetchRanges(url, ranges, ..., valuesOffset)` | Fetch values via Range Request |
-| `readColumnarValues(buffer, header, leafCount)` | Decode columnar values (varint + fixed) |
-| `clearIndexCache()` / `clearLeafCache()` | Clear client-side caches |
-| `splitAntimeridian(bbox, latMin, latMax)` | Handle ±180° wrapping |
-| `decodeCustomQuadkey(qk, zoom, ...)` | Custom CRS quadkey → coords |
+| `openQBT(url)` → `QBT` | Unified loader — auto-detects mode from header flags |
+| `QBT.getTile(z, x, y)` | Fetch tile data via Range Request (variable mode) |
+| `QBT.query(bbox)` | Spatial query — all modes (Range Request or in-memory) |
+| `QBT.columns` | Column values as `Map<string, number[]>` (columnar mode) |
+| `QBT.addProtocol(maplibregl)` | One-line MapLibre custom protocol (variable mode) |
+| `QBT.toWGS84(x, y)` | CRS conversion via proj4 (built-in for common EPSG codes) |
+| `registerCRS(epsg, proj4Def)` | Register custom CRS definitions |
+
+Low-level: `parseQBTHeader()`, `queryBbox()`, `mergeRanges()`, `fetchRanges()`, `readColumnarValues()`
 
 ## Live Demos
 

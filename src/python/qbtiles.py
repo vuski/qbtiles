@@ -879,14 +879,16 @@ def write_qbt_columnar(output_path, bitmask_bytes, columns, leaf_count,
             f.write(content)
 
 
-def write_qbt_variable(output_path, root, data_path=None,
+def write_qbt_variable(output_path, root, tile_entries=None,
                        zoom=None, crs=4326, origin_x=-180.0, origin_y=90.0,
                        extent_x=360.0, extent_y=180.0, metadata=None):
-    """Variable-entry 모드 QBT 파일 생성 (타일 아카이브 인덱스).
+    """Variable-entry 모드 QBT 단일 파일 생성 (인덱스 + 타일 데이터).
 
     Args:
         root: 쿼드트리 루트 노드.
-        data_path: 외부 데이터 파일 경로 (inline이 아닌 경우).
+        tile_entries: index_tile_folder()의 결과 리스트.
+            [(quadkey_int64, filepath, offset, length, run_length), ...]
+            주어지면 타일 데이터를 values section에 연결.
     """
     # BFS → bitmask + varints
     current_level = [root]
@@ -943,16 +945,20 @@ def write_qbt_variable(output_path, root, data_path=None,
     flags = 0x0  # bit0=0 (variable), bit1=0 (row)
     metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
 
-    # bitmask_length = compressed index (bitmask + varints)
-    # values_offset/values_length = 0 (외부 데이터 파일)
     field_schema_bytes = b''
     header_size = 128
     index_hash = hashlib.sha256(index_bytes).digest()
 
+    # Compute values section size
+    values_offset = header_size + len(compressed_index)
+    values_length = 0
+    if tile_entries:
+        values_length = sum(length for _, _, _, length, _ in tile_entries)
+
     metadata_offset = 0
     metadata_length = 0
     if metadata_bytes:
-        metadata_offset = header_size + len(compressed_index)
+        metadata_offset = values_offset + values_length
         metadata_length = len(metadata_bytes)
 
     header = bytearray(128)
@@ -967,8 +973,8 @@ def write_qbt_variable(output_path, root, data_path=None,
     struct.pack_into('<d', header, 32, extent_x)
     struct.pack_into('<d', header, 40, extent_y)
     struct.pack_into('<Q', header, 48, len(compressed_index))
-    struct.pack_into('<Q', header, 56, 0)  # values_offset = 0 (external)
-    struct.pack_into('<Q', header, 64, 0)  # values_length = 0
+    struct.pack_into('<Q', header, 56, values_offset)
+    struct.pack_into('<Q', header, 64, values_length)
     struct.pack_into('<Q', header, 72, metadata_offset)
     struct.pack_into('<Q', header, 80, metadata_length)
     struct.pack_into('<I', header, 88, 0)  # entry_size = 0
@@ -979,6 +985,11 @@ def write_qbt_variable(output_path, root, data_path=None,
     with open(output_path, 'wb') as f:
         f.write(bytes(header))
         f.write(compressed_index)
+        # Write tile data in quadkey order
+        if tile_entries:
+            for _, filepath, _, length, _ in tile_entries:
+                with open(filepath, 'rb') as tf:
+                    f.write(tf.read())
         if metadata_bytes:
             f.write(metadata_bytes)
 
@@ -1040,3 +1051,383 @@ def read_qbt_header(filepath_or_bytes):
         offset += 4 + name_len
 
     return h
+
+
+# ============================================================
+# High-level unified builder
+# ============================================================
+
+def build(output_path, folder=None, geotiff=None,
+          coords=None, quadkeys=None,
+          columns=None, values=None,
+          zoom=None, cell_size=None,
+          crs=4326, origin_x=-180.0, origin_y=90.0,
+          extent_x=360.0, extent_y=180.0,
+          entry_size=4, fields=None, ext=".png", metadata=None,
+          compress=True, compress_bitmask=True):
+    """QBT 파일 생성 — 인자 조합으로 모드 자동 판단.
+
+    GeoTIFF 변환:
+        qbt.build("output.qbt", geotiff="input.tif")
+
+    Variable-entry (타일 아카이브):
+        qbt.build("output.qbt", folder="tiles/")
+
+    Columnar (격자 데이터, 전체 다운로드):
+        qbt.build("out.qbt.gz", coords=[(x,y),...], columns={"pop": [...]}, zoom=13, crs=5179, ...)
+
+    Fixed row (격자 데이터, Range Request):
+        qbt.build("out.qbt", coords=[(x,y),...], values=[...], zoom=16, ...)
+
+    Args:
+        output_path: 출력 파일 경로.
+        folder: 타일 폴더 (variable-entry 모드).
+        coords: [(x, y), ...] 좌표 리스트 — 내부에서 quadkey로 변환.
+        quadkeys: [int, ...] quadkey int64 리스트 — coords 대신 직접 제공.
+        columns: {"name": [values], ...} 컬럼 딕셔너리 (columnar 모드).
+        values: 값 리스트 또는 bytes (fixed row 모드).
+        zoom: 줌 레벨.
+        crs: EPSG 코드 (기본 4326).
+        origin_x, origin_y: 격자 원점.
+        extent_x, extent_y: 격자 범위.
+        entry_size: 엔트리 크기 (fixed row, 기본 4).
+        fields: 필드 스키마 리스트.
+        ext: 타일 확장자 (기본 ".png").
+        metadata: JSON 메타데이터 문자열.
+        compress: 전체 gzip 압축 (columnar, 기본 True).
+        compress_bitmask: bitmask gzip 압축 (기본 True).
+    """
+    import math
+
+    # GeoTIFF → extract coords, values, cell_size, crs automatically
+    if geotiff is not None:
+        try:
+            import rasterio
+            import numpy as np
+        except ImportError:
+            raise ImportError(
+                "rasterio and numpy are required for GeoTIFF conversion. "
+                "Install with: pip install rasterio numpy"
+            )
+        with rasterio.open(geotiff) as src:
+            nodata = src.nodata
+            transform = src.transform
+            geotiff_crs = src.crs.to_epsg() if src.crs else None
+            if geotiff_crs is None:
+                # WKT but no EPSG — try to detect WGS84
+                if src.crs and 'WGS 84' in src.crs.to_wkt():
+                    geotiff_crs = 4326
+                else:
+                    geotiff_crs = 4326
+                    import warnings
+                    warnings.warn(
+                        f"Could not determine EPSG code from CRS, defaulting to 4326",
+                        stacklevel=2,
+                    )
+
+            # Read all bands
+            band_count = src.count
+            band_names = list(src.descriptions) if any(src.descriptions) else None
+            arrays = []
+            for b in range(1, band_count + 1):
+                arrays.append(src.read(b))
+
+            # Find valid (non-nodata) cells
+            if nodata is not None:
+                mask = arrays[0] != nodata
+            else:
+                mask = np.ones(arrays[0].shape, dtype=bool)
+
+            rows, cols_arr = np.where(mask)
+            n_valid = len(rows)
+
+            if n_valid == 0:
+                raise ValueError(f"No valid cells found in {geotiff}")
+
+            # Cell centers
+            pixel_w = abs(transform[0])
+            pixel_h = abs(transform[4])
+            xs = transform[2] + cols_arr * transform[0] + transform[0] / 2
+            ys = transform[5] + rows * transform[4] + transform[4] / 2
+
+            import warnings
+            warnings.warn(
+                f"GeoTIFF: {geotiff} → {n_valid:,} valid cells out of "
+                f"{arrays[0].size:,} ({n_valid/arrays[0].size*100:.1f}%), "
+                f"CRS=EPSG:{geotiff_crs}, pixel={pixel_w}×{pixel_h}",
+                stacklevel=2,
+            )
+
+            coords = list(zip(xs.tolist(), ys.tolist()))
+            crs = geotiff_crs or crs
+
+            if cell_size is None:
+                cell_size = pixel_w
+
+            # Auto-calculate origin/extent from GeoTIFF bounds
+            bounds = src.bounds  # left, bottom, right, top
+            data_w = bounds.right - bounds.left
+            data_h = bounds.top - bounds.bottom
+            data_range = max(data_w, data_h)
+
+            # extent = cell_size × 2^zoom (smallest power of 2 that covers data)
+            import math
+            zoom_needed = math.ceil(math.log2(data_range / cell_size))
+            auto_extent = cell_size * (2 ** zoom_needed)
+
+            # Origin = align to cell boundaries, covering all data
+            origin_x = math.floor(bounds.left / cell_size) * cell_size
+            origin_y = math.floor(bounds.bottom / cell_size) * cell_size
+
+            # Ensure extent covers all data from origin
+            while origin_x + auto_extent < bounds.right:
+                zoom_needed += 1
+                auto_extent = cell_size * (2 ** zoom_needed)
+            while origin_y + auto_extent < bounds.top:
+                zoom_needed += 1
+                auto_extent = cell_size * (2 ** zoom_needed)
+
+            extent_x = auto_extent
+            extent_y = auto_extent
+
+            if band_count == 1:
+                # Single band → fixed row mode
+                values = arrays[0][rows, cols_arr].tolist()
+                is_int = np.issubdtype(arrays[0].dtype, np.integer)
+                if fields is None:
+                    name = (band_names[0] if band_names and band_names[0] else 'value')
+                    type_code = TYPE_INT32 if is_int else TYPE_FLOAT32
+                    fields = [{'type': type_code, 'name': name}]
+                    entry_size = _TYPE_SIZE[type_code]
+            else:
+                # Multiple bands → columnar mode
+                columns = {}
+                for b in range(band_count):
+                    name = (band_names[b] if band_names and band_names[b] else f'band{b+1}')
+                    columns[name] = arrays[b][rows, cols_arr].tolist()
+                # Convert int arrays to int for varint detection
+                if np.issubdtype(arrays[0].dtype, np.integer):
+                    columns = {k: [int(v) for v in vals] for k, vals in columns.items()}
+
+    # Auto-calculate origin/extent from coords + cell_size (custom CRS only)
+    if coords is not None and cell_size is not None and crs != 4326:
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        data_range = max(max_x - min_x, max_y - min_y) + cell_size  # +1 cell padding
+
+        # extent = cell_size × 2^zoom (smallest power of 2 that covers the data)
+        zoom_needed = math.ceil(math.log2(data_range / cell_size))
+        auto_extent = cell_size * (2 ** zoom_needed)
+
+        # Center the grid on the data
+        cx = (min_x + max_x) / 2
+        cy = (min_y + max_y) / 2
+        auto_origin_x = cx - auto_extent / 2
+        auto_origin_y = cy - auto_extent / 2
+
+        # Align origin to cell boundaries
+        auto_origin_x = math.floor(auto_origin_x / cell_size) * cell_size
+        auto_origin_y = math.floor(auto_origin_y / cell_size) * cell_size
+
+        # Use auto values only if user didn't explicitly set them
+        if origin_x == -180.0 and origin_y == 90.0:
+            origin_x = auto_origin_x
+            origin_y = auto_origin_y
+        if extent_x == 360.0 and extent_y == 180.0:
+            extent_x = auto_extent
+            extent_y = auto_extent
+
+    # cell_size → zoom 자동 계산
+    if cell_size is not None and zoom is None:
+        zoom = round(math.log2(extent_x / cell_size))
+        if abs(extent_x / (2 ** zoom) - cell_size) > cell_size * 0.01:
+            raise ValueError(
+                f"cell_size={cell_size} does not divide extent_x={extent_x} into a power of 2. "
+                f"Nearest zoom={zoom} gives cell_size={extent_x / (2 ** zoom):.6f}"
+            )
+    elif cell_size is not None and zoom is not None:
+        raise ValueError("Provide either zoom or cell_size, not both")
+
+    if folder is not None:
+        # Variable-entry: 타일 아카이브
+        tile_entries = index_tile_folder(folder, ext)
+        if not tile_entries:
+            raise ValueError(f"No tiles found in {folder}")
+        root = build_quadtree(tile_entries)
+        max_zoom = max(e[0].bit_length() // 2 for e in tile_entries) if zoom is None else zoom
+        write_qbt_variable(output_path, root, tile_entries=tile_entries,
+                          zoom=max_zoom, crs=crs,
+                          origin_x=origin_x, origin_y=origin_y,
+                          extent_x=extent_x, extent_y=extent_y,
+                          metadata=metadata)
+        return tile_entries
+
+    # coords → quadkeys 변환
+    if coords is not None and quadkeys is None:
+        if zoom is None:
+            raise ValueError("zoom is required when using coords")
+        extent = extent_x  # square grid assumed for custom CRS
+        actual_cell = extent / (2 ** zoom)
+        import warnings
+        warnings.warn(
+            f"Coordinates will be snapped to {actual_cell}×{actual_cell} grid cells "
+            f"(zoom={zoom}, extent={extent}). "
+            f"Each coordinate maps to the cell center.",
+            stacklevel=2,
+        )
+        quadkeys = [encode_custom_quadkey(x, y, zoom, origin_x, origin_y, extent)
+                    for x, y in coords]
+
+    if quadkeys is None:
+        raise ValueError("One of folder, coords, or quadkeys is required")
+
+    # Validate column types early
+    if columns is not None:
+        for name, vals in columns.items():
+            if not all(isinstance(v, (int, float)) for v in vals):
+                raise ValueError(
+                    f"Column '{name}' contains non-numeric values. "
+                    f"Only int and float are supported."
+                )
+
+    # Detect duplicate quadkeys (multiple points in same grid cell)
+    if (columns is not None or values is not None) and len(quadkeys) != len(set(quadkeys)):
+        import warnings
+        from collections import Counter
+        qk_counts = Counter(quadkeys)
+        n_dups = sum(1 for c in qk_counts.values() if c > 1)
+        total_merged = sum(c for c in qk_counts.values() if c > 1)
+
+        if columns is not None:
+            # Check each column: numeric → sum, non-numeric → must be identical
+            merged_columns = {}
+            for name, vals in columns.items():
+                is_numeric = all(isinstance(v, (int, float)) for v in vals)
+                if is_numeric:
+                    # Sum values per grid cell
+                    agg = {}
+                    for qk, v in zip(quadkeys, vals):
+                        agg[qk] = agg.get(qk, 0) + v
+                    merged_columns[name] = agg
+                else:
+                    # Non-numeric: must be identical within each cell
+                    agg = {}
+                    for qk, v in zip(quadkeys, vals):
+                        if qk in agg:
+                            if agg[qk] != v:
+                                raise ValueError(
+                                    f"Column '{name}' has conflicting non-numeric values "
+                                    f"in the same grid cell: {agg[qk]!r} vs {v!r}"
+                                )
+                        else:
+                            agg[qk] = v
+                    merged_columns[name] = agg
+
+            warnings.warn(
+                f"{n_dups} grid cells contain multiple points ({total_merged} total). "
+                f"Numeric columns summed.",
+                stacklevel=2,
+            )
+
+            # Rebuild quadkeys and columns from merged data
+            unique_qks = sorted(merged_columns[list(columns.keys())[0]].keys())
+            quadkeys = unique_qks
+            columns = {name: [agg[qk] for qk in unique_qks] for name, agg in merged_columns.items()}
+
+        elif values is not None:
+            if isinstance(values, (bytes, bytearray)):
+                raise ValueError(
+                    f"{n_dups} grid cells contain multiple points, "
+                    f"but raw bytes values cannot be merged. "
+                    f"Pre-aggregate your data or use list values."
+                )
+            # Sum numeric values
+            is_numeric = all(isinstance(v, (int, float)) for v in values)
+            if not is_numeric:
+                raise ValueError(
+                    f"{n_dups} grid cells contain multiple points with non-numeric values."
+                )
+            agg = {}
+            for qk, v in zip(quadkeys, values):
+                agg[qk] = agg.get(qk, 0) + v
+            warnings.warn(
+                f"{n_dups} grid cells contain multiple points ({total_merged} total). "
+                f"Values summed.",
+                stacklevel=2,
+            )
+            unique_qks = sorted(agg.keys())
+            quadkeys = unique_qks
+            values = [agg[qk] for qk in unique_qks]
+
+    if columns is not None:
+        # Columnar 모드
+        if zoom is None:
+            raise ValueError("zoom is required for columnar mode")
+
+        # quadkey → quadtree
+        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
+        root = build_quadtree(quadkey_info)
+        bitmask_bytes, leaf_count = serialize_bitmask(root)
+
+        # 정렬: quadkey 순서로 values 정렬
+        sorted_indices = sorted(range(len(quadkeys)), key=lambda i: quadkeys[i])
+
+        # 타입 자동 추론 + 컬럼 구축
+        col_list = []
+        field_list = []
+        for name, vals in columns.items():
+            sorted_vals = [vals[i] for i in sorted_indices]
+            if not all(isinstance(v, (int, float)) for v in vals):
+                raise ValueError(
+                    f"Column '{name}' contains non-numeric values. "
+                    f"Only int and float are supported."
+                )
+            if all(isinstance(v, int) for v in vals):
+                type_code = TYPE_VARINT
+            else:
+                type_code = TYPE_FLOAT32
+            col_list.append((type_code, sorted_vals))
+            field_list.append({'type': type_code, 'offset': 0, 'name': name})
+
+        write_qbt_columnar(output_path, bitmask_bytes, col_list, leaf_count,
+                          zoom=zoom, crs=crs,
+                          origin_x=origin_x, origin_y=origin_y,
+                          extent_x=extent_x, extent_y=extent_y,
+                          fields=fields or field_list,
+                          metadata=metadata, compress=compress,
+                          compress_bitmask=compress_bitmask)
+
+    elif values is not None:
+        # Fixed row 모드
+        if zoom is None:
+            raise ValueError("zoom is required for fixed row mode")
+
+        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
+        root = build_quadtree(quadkey_info)
+        bitmask_bytes, leaf_count = serialize_bitmask(root)
+
+        sorted_indices = sorted(range(len(quadkeys)), key=lambda i: quadkeys[i])
+
+        # values를 bytes로 변환
+        if isinstance(values, (bytes, bytearray)):
+            values_bytes = values
+        else:
+            # list of numbers → pack as bytes
+            if fields and len(fields) == 1:
+                fmt = '<' + _TYPE_STRUCT.get(fields[0]['type'], 'f')
+            else:
+                fmt = '<f'  # default float32
+            sorted_vals = [values[i] for i in sorted_indices]
+            values_bytes = b''.join(struct.pack(fmt, v) for v in sorted_vals)
+
+        write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
+                       zoom=zoom, crs=crs,
+                       origin_x=origin_x, origin_y=origin_y,
+                       extent_x=extent_x, extent_y=extent_y,
+                       entry_size=entry_size, fields=fields,
+                       metadata=metadata, compress_bitmask=compress_bitmask)
+
+    else:
+        raise ValueError("One of folder, columns, or values is required")

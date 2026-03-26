@@ -73,24 +73,26 @@ Used as multi-level bitmap indices in databases. Hierarchical structure where ch
 
 QBT file construction and serialization:
 
+- **`build()`** — unified builder: auto-detects mode from arguments (`folder` → variable, `columns` → columnar, `values` → fixed), auto-calculates zoom from `cell_size`, auto-calculates origin/extent from coordinates
+- **`build(geotiff=)`** — converts GeoTIFF to QBTiles directly (auto-detects cell_size, CRS, origin, extent, nodata)
 - Quadtree construction: `build_quadtree()`
 - Bitmask serialization: `serialize_bitmask()`
 - File writers: `write_qbt_variable()`, `write_qbt_fixed()`, `write_qbt_columnar()`
 - Header parsing: `read_qbt_header()`
 - Quadkey conversion: `tile_to_quadkey_int64()`, `quadkey_int64_to_zxy()`, etc.
-- Custom CRS: `encode_custom_quadkey()`, `decode_custom_quadkey()`
-- Legacy: `write_tree_bitmask_to_single_file()`, `deserialize_quadtree_index()` (v0.1 compat)
 
 ### TypeScript Reader (`src/typescript/`)
 
 Browser-side QBT reading and spatial query:
 
-- Header: `parseQBTHeader()` → `QBTHeader`
-- Index loading: `loadQBT()` → header fetch + bitmask download, hash-cached
-- Spatial query: `queryBbox()`, `mergeRanges()`, `fetchRanges()`
-- Columnar reader: `readColumnarValues()` → `Map<string, number[]>`
-- Cache: `clearIndexCache()`, `clearLeafCache()`
-- Legacy: `deserializeQuadtreeIndex()` → `Map<bigint, QBTilesIndex>` (v0.1 compat)
+- **`openQBT(url)`** → `QBT` class — unified loader, auto-detects mode from header flags
+- `QBT.getTile(z, x, y)` — fetch tile data (variable mode)
+- `QBT.query(bbox)` — spatial query (all modes)
+- `QBT.columns` — column values (columnar mode)
+- `QBT.addProtocol(maplibregl)` — MapLibre custom protocol (variable mode)
+- `QBT.toWGS84(x, y)` / `QBT.fromWGS84(lng, lat)` — CRS conversion via proj4
+- `registerCRS(epsg, proj4Def)` — register custom CRS definitions
+- Low-level: `parseQBTHeader()`, `queryBbox()`, `mergeRanges()`, `fetchRanges()`, `readColumnarValues()`
 
 ### C++ Encoder (`src/cpp/`)
 
@@ -102,33 +104,42 @@ Batch conversion of PMTiles Hilbert tile IDs to QBTiles quadkey int64. Interface
 
 ```
 Build time:
-  Tile data files
+  qbt.build("output.qbt", folder="tiles/")
     → Sort by quadkey
     → Build quadtree → serialize_bitmask() + varint arrays
-    → write_qbt_variable() → .qbt file (header + gzip(bitmask+varints))
+    → write_qbt_variable() → single .qbt file
+      [header][gzip(bitmask + varints)][tile_data...]
 
 Runtime:
-  loadQBT(url)
+  openQBT(url)
     → fetch header (128B) → check index hash cache
-    → fetch bitmask section → gzip decompress → build lazy tree
-    → queryBbox() → mergeRanges() → fetchRanges() via Range Request
+    → fetch bitmask section → gzip decompress → build index
+    → getTile(z, x, y) → Range Request for tile data
+    → addProtocol(maplibregl) → MapLibre custom protocol
 ```
 
 ### Fixed-entry (Raster Grid)
 
 ```
 Build time:
-  Spatial data (coordinates + values)
-    → Encode to quadtree → serialize_bitmask()
-    → write_qbt_fixed() → .qbt (header + gzip(bitmask) + raw values)
-    OR write_qbt_columnar() → .qbt.gz (header + bitmask + columnar values, all gzipped)
+  qbt.build("output.qbt", coords=..., values=..., cell_size=1000)
+    → Auto-calculate zoom/origin/extent, snap coords to grid
+    → Build quadtree → serialize_bitmask()
+    → write_qbt_fixed() → single .qbt file
+      [header][gzip(bitmask)][raw values]
+
+  qbt.build("output.qbt.gz", coords=..., columns=..., cell_size=100, crs=5179)
+    → write_qbt_columnar() → single .qbt.gz file
+      gzip([header][gzip(bitmask)][col1][col2]...)
 
 Runtime (fixed row):
-  loadQBT(url)
-    → fetch header → fetch bitmask → build index
-    → queryBbox() → leaf indices → Range Request per cell
+  openQBT(url)
+    → fetch header → fetch bitmask via Range Request → build index
+    → query(bbox) → leaf indices → Range Request per cell
 
 Runtime (columnar):
-  fetch .qbt.gz → decompress → parseQBTHeader() → deserializeBitmaskIndex()
-    → readColumnarValues() → Map<fieldName, number[]>
+  openQBT(url)
+    → fetch entire .qbt.gz → decompress → parse header + bitmask + columns
+    → columns → Map<fieldName, number[]>
+    → query(bbox) → in-memory lookup
 ```

@@ -1,89 +1,106 @@
 # QBTiles
 
-**QBTiles** (Quadkey Bitmask Tiles)는 클라우드 최적화 타일 아카이브 인덱스 포맷이다.
+**QBTiles** (Quadkey Bitmask Tiles)는 존재하는 위치를 트리 구조로 암시하여 ID 저장 비용을 0으로 만드는 공간 데이터 포맷이다.
 
-타일 존재 여부를 **4비트 비트마스크**로 BFS 순서로 인코딩한다. 존재하는 위치를 트리 구조로 암시하여 **ID 저장 비용을 0으로 만든다** — 비트마스크만으로 모든 quadkey를 복원할 수 있다.
+타일/셀의 존재 여부를 BFS 순서의 **4-bit bitmask**로 저장한다. 각 항목의 위치는 트리 구조에 의해 암시되므로 **ID도, 좌표도 저장하지 않는다**.
 
 ## 왜 QBTiles인가?
 
-PMTiles를 사용하던 중, 동일한 공간 구조를 가진 시계열 타일셋에서 매번 별도의 인덱스를 읽어야 하는 비효율을 발견했다. QBTiles는 **인덱스를 데이터와 분리**하여, 하나의 인덱스를 여러 데이터 파일에 재사용할 수 있도록 설계되었다.
+- **더 작지만 더 정밀한 접근**: PMTiles보다 20–30% 작은 인덱스, COG의 512×512 블록 대비 셀 단위 Range Request 지원. [비교 보기 →](data-container.md)
+- **빈 공간은 건너뜀**: bitmask 트리는 존재하는 셀만 저장 — nodata에 바이트를 낭비하지 않음
+- **3가지 모드 지원**: 타일 아카이브 (variable-entry), 래스터 그리드 (fixed row), 압축 그리드 (fixed columnar)
+- **인덱스 재사용**: SHA-256으로 동일한 공간 구조를 가진 시계열 파일 간 인덱스 재사용 가능
+- **클라우드 네이티브**: HTTP Range Request를 통한 서버리스 서빙 (S3, R2 등)
 
-## 주요 특징
+## 설치
 
-- **작은 인덱스**: 데이터 밀도에 따라 PMTiles 대비 5~48% 절감
-- **인덱스 분리**: 동일 타일 구조의 여러 데이터 파일에 인덱스 재사용
-- **단순한 인코딩**: 쿼드트리 비트마스크 BFS — 힐베르트 곡선 계산 불필요
-- **클라우드 네이티브**: HTTP Range Request로 서버리스 타일 서빙 (S3, R2 등)
+```bash
+pip install qbtiles    # Python — build & write QBT files
+npm install qbtiles    # TypeScript — read & query in the browser
+```
 
 ## 빠른 시작
 
-### 인덱스 구축 (Python)
+### Python — QBT 파일 생성
 
 ```python
 import qbtiles as qbt
 
-# 1. 타일 정의 — 각 타일의 위치(z/x/y)와 데이터 파일 내 위치
-tiles = [
-    # (z,  x,  y,  offset, length)
-    (3,   6,  3,       0,   1024),
-    (3,   6,  4,    1024,   2048),
-    (3,   7,  3,    3072,   1536),
-    (3,   7,  4,    4608,   1024),
-]
+# Mode 1: Tile archive — from a folder of z/x/y tiles (e.g., tiles/5/27/12.mvt)
+qbt.build("korea_tiles.qbt", folder="tiles/")
 
-# 2. z/x/y를 quadkey로 변환 → 정렬 → 트리 구축 → 직렬화
-quadkey_info = []
-for z, x, y, offset, length in tiles:
-    qk = qbt.tile_to_quadkey_int64(z, x, y)
-    quadkey_info.append((qk, "", offset, length, 1))
+# Mode 2: Columnar — coordinates + multiple value columns
+# coords: list of (x, y) in the target CRS
+# columns: dict of column_name → value list (same length as coords)
+# cell_size: grid cell size in CRS units (meters for EPSG:5179)
+# → zoom, origin, extent are auto-calculated from coords and cell_size
+qbt.build("population.qbt.gz",
+    coords=list(zip(df["x"], df["y"])),         # [(950000, 1950000), ...]
+    columns={"total": totals, "male": males, "female": females},
+    cell_size=100, crs=5179)                     # 100m grid, Korean CRS
 
-quadkey_info.sort(key=lambda x: x[0])
-root = qbt.build_quadtree(quadkey_info)
-qbt.write_tree_bitmask_to_single_file(root, "index.gz")
+# Mode 3: Fixed row — coordinates + single value array (for Range Request)
+# values: flat list of numbers (one per cell)
+# entry_size: bytes per cell (4 for float32)
+qbt.build("global_pop.qbt",
+    coords=list(zip(lons, lats)),                # [(-73.99, 40.75), ...]
+    values=population,                           # [52.3, 41.2, ...]
+    cell_size=1000, entry_size=4,                # 1km grid, 4 bytes/cell
+    fields=[{"type": qbt.TYPE_FLOAT32, "name": "pop"}])
+
+# GeoTIFF → QBTiles conversion (cell_size, CRS, extent auto-detected)
+qbt.build("worldpop.qbt", geotiff="worldpop_2025.tif")
 ```
 
-### 인덱스 읽기 & 타일 조회 (Python)
-
-```python
-# 3. 인덱스 역직렬화
-entries = qbt.deserialize_quadtree_index("index.gz")
-index_dict = qbt.build_quadkey_index_dict(entries)
-
-# 4. z/x/y로 타일 조회
-qk = qbt.tile_to_quadkey_int64(3, 7, 3)
-entry = index_dict[qk]
-print(entry["offset"], entry["length"])
-# → offset/length로 HTTP Range Request
-```
-
-### 브라우저에서 인덱스 읽기 (TypeScript)
+### TypeScript — 읽기 및 쿼리
 
 ```typescript
-import { deserializeQuadtreeIndex, tileToQuadkeyInt64 } from './qbtiles';
+import { openQBT } from "qbtiles";
 
-// index.gz를 fetch하고 gzip 해제한 후:
-const entryMap = deserializeQuadtreeIndex(buffer);
-const qk = tileToQuadkeyInt64(3, 7, 3);
-const entry = entryMap.get(qk);
-// → { offset: 3072, length: 1536 } → HTTP Range Request
+// openQBT reads the header, detects the mode, and loads data automatically.
+
+// Mode 1: Tile archive — serve MVT/PNG tiles from a single .qbt file
+const tiles = await openQBT("korea_tiles.qbt");
+const tile = await tiles.getTile(7, 109, 49); // ArrayBuffer (gzip MVT) | null
+tiles.addProtocol(maplibregl, "qbt"); // one-line MapLibre integration
+
+// Mode 3: Fixed row — per-cell Range Request on a remote file
+const grid = await openQBT("https://cdn.example.com/global_pop.qbt");
+const cells = await grid.query([126, 35, 128, 37]); // [west, south, east, north]
+// → Array<{ position: [lng, lat], value: number }>
+
+// Mode 2: Columnar — downloads entire file, queries in memory
+const pop = await openQBT("population.qbt.gz");
+pop.columns!.get("total")!; // number[931495] — direct access
+const result = await pop.query([126, 35, 128, 37]);
+// → Array<{ position: [lng, lat], values: {total: 523, male: 261, female: 262} }>
 ```
+
+## 3가지 모드
+
+| Mode               | Flags | 용도                     | 비교 대상(유사 형식) |
+| ------------------ | ----- | ------------------------ | -------------------- |
+| **Variable-entry** | `0x0` | 타일 아카이브 (MVT, PNG) | PMTiles              |
+| **Fixed row**      | `0x1` | 래스터 그리드            | COG (GeoTIFF)        |
+| **Fixed columnar** | `0x3` | 압축 그리드              | Parquet              |
 
 ## 프로젝트 구조
 
 ```
 src/
-  python/qbtiles.py        — 인덱스 빌더 및 직렬화
-  typescript/qbtiles.ts    — 클라이언트 리더 (브라우저)
-  cpp/                     — 네이티브 힐베르트→쿼드키 인코더 (pybind11)
-examples/                  — 사용 예제 및 샘플 데이터
+  python/qbtiles.py          — Python library: build(), quadtree, QBT write/read
+  typescript/qbtiles.ts      — TypeScript entry point: re-exports all modules
+  typescript/qbt.ts          — Unified reader: QBT class, openQBT(), registerCRS()
+  typescript/qbt-header.ts   — Header parser (parseQBTHeader)
+  typescript/qbt-reader.ts   — Low-level reader (loadQBTVariable, loadQBTColumnar)
+  typescript/bitmask-index.ts — Lazy tree index, spatial query, Range Request
+  typescript/types.ts        — Shared types (BBox, GridParams, coord utils)
+  cpp/                       — Native Hilbert→quadkey encoder (pybind11, optional)
+demo-src/                    — Vite + React demo source (3 pages + landing)
+docs/                        — MkDocs documentation site source
+examples/                    — Sample data files (.qbt, .qbt.gz, .pmtiles)
+dist/                        — npm build output (ESM + CJS + .d.ts)
 ```
-
-## 상태
-
-QBTiles는 PMTiles를 완전히 대체하는 수준은 아니다:
-
-- 100GB 이상 데이터셋에 대한 계층적 디렉토리 분할 미구현
-- 인덱스 빌드 시간이 PMTiles 직렬화보다 약 2배 느림
 
 ## 라이선스
 

@@ -25,6 +25,8 @@ export interface QBTCellData {
   position: [lng: number, lat: number];
   value: number;
   chunkIndex: number;
+  /** All column values (columnar mode). Key = field name, value = number. */
+  values?: Record<string, number>;
 }
 
 export interface QBTChunk {

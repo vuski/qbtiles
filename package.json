@@ -40,7 +40,11 @@
   },
   "homepage": "https://vuski.github.io/qbtiles/",
   "devDependencies": {
+    "@types/proj4": "^2.5.6",
     "tsup": "^8.5.1",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "proj4": "^2.20.4"
   }
 }

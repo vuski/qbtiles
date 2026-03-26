@@ -2,118 +2,98 @@
 
 ## PMTiles vs QBTiles
 
-### 인덱스 크기 비교
-
-동일한 타일셋에 대해:
-
-
-| 형식                       | 비압축       | gzip 압축   |
-| ------------------------ | --------- | --------- |
-| CSV (행 방향)               | 142 KB    | 43 KB     |
-| **QBTiles (바이너리, 열 방향)** | **18 KB** | **11 KB** |
-
-
 ### PMTiles 인덱스 구조
 
 ```
 [entry_count (varint)]
-[tile_id_delta_0, tile_id_delta_1, ... (varint 배열)]
-[run_length_0, run_length_1, ... (varint 배열)]
-[length_0, length_1, ... (varint 배열)]
-[offset_0, offset_1, ... (varint 배열, delta 인코딩)]
+[tile_id_delta_0, tile_id_delta_1, ... (varint array)]
+[run_length_0, run_length_1, ... (varint array)]
+[length_0, length_1, ... (varint array)]
+[offset_0, offset_1, ... (varint array, delta encoded)]
 ```
 
-- 타일마다 **tile_id delta를 varint로 기록**해야 한다
-- 타일이 듬성듬성 분포하면 delta가 커지고 varint 바이트도 늘어난다
-- 빈 타일을 "스킵"하는 것이 아니라, ID 간 갭을 숫자로 기록하는 방식
+- 각 타일마다 **tile_id delta를 varint로 저장**해야 함
+- 타일 분포가 희소할수록 → delta가 커지고 → 바이트 소비 증가
+- 빈 타일은 간격을 숫자로 인코딩하여 "건너뜀"
 
-### QBTiles 인덱스 구조
+### QBTiles 파일 구조 (v0.5.0)
 
 ```
-[bitmask_byte_length (4 bytes, big-endian)]
-[bitmask 섹션: 4비트 × 2 팩킹, BFS 순회]
-[run_lengths (varint 배열)]
-[lengths (varint 배열)]
-[offsets (varint 배열, delta 인코딩)]
+[128B+ header: magic, version, flags, zoom, CRS, origin, extent,
+               bitmask_length, values_offset, index_hash, field schema]
+[bitmask section: 4-bit × 2 packed, BFS order (gzip-compressed)]
+[values section: varints (variable mode) or fixed-size entries (fixed mode)]
 ```
 
-- **tile_id 배열이 없다** — 비트마스크에서 quadkey를 복원
-- 존재하지 않는 타일은 비트가 0일 뿐, **0비트 비용**
-- 열 방향 저장으로 같은 종류의 값이 연속 → delta+gzip 압축률 극대화
+- **tile_id 배열 없음** — quadkey는 bitmask로부터 복원
+- 존재하지 않는 타일은 bit 0 — **비용 0**
+- column-oriented 저장 → 같은 타입의 값을 모아 → 더 나은 압축률
+- 3가지 모드: variable-entry (타일), fixed row (Range Request), fixed columnar (일괄 다운로드)
 
 ### 핵심 차이
 
-PMTiles는 tile_id를 개별 저장하는 **열거 방식**이다.
-QBTiles는 타일 존재 여부를 비트마스크로 표현하는 **구조적 방식**이다.
+PMTiles는 타일 ID를 delta로 **열거**한다.
+QBTiles는 타일 존재 여부를 bitmask로 **구조적으로 인코딩**한다.
 
-구조적 방식에서는 존재하지 않는 타일이 추가 비용을 발생시키지 않으므로, 타일이 전체 공간에서 일부만 차지하는 일반적인 경우에 더 효율적이다.
+구조적 접근에서는 존재하지 않는 타일에 추가 비용이 들지 않는다. 타일이 전체 공간의 일부만 차지하는 일반적인 경우에 더 효율적이다.
 
 ---
 
 ## Sparse Voxel Octree (SVO) vs QBTiles
 
-SVO는 QBTiles와 **가장 직접적으로 같은 아이디어**의 3D 버전이다.
+SVO는 **가장 직접적으로 유사한 기법**이다 — 3D에서의 동일한 아이디어.
 
-### 공통점
+### 유사점
 
+| | SVO | QBTiles |
+|---|---|---|
+| 공간 분할 | Octree (8-way) | Quadtree (4-way) |
+| 존재 인코딩 | 8-bit bitmask | 4-bit bitmask |
+| 핵심 원리 | 존재하는 자식만 직렬화 → 순차 읽기로 디코딩 | 동일 |
+| 빈 영역 비용 | 0 bits | 0 bits |
+| 부분 접근 | VRAM 내 shader 순회 | HTTP Range Request |
 
-|         | SVO                       | QBTiles            |
-| ------- | ------------------------- | ------------------ |
-| 공간 분할   | Octree (8분할)              | Quadtree (4분할)     |
-| 존재 표현   | 8비트 비트마스크                 | 4비트 비트마스크          |
-| 핵심 원리   | 존재하는 자식만 직렬화 → 순차 읽기로 디코딩 | 동일                 |
-| 빈 영역 비용 | 0비트                       | 0비트                |
-| 부분 접근   | VRAM에서 셰이더 탐색             | HTTP Range Request |
+두 방식 모두 **"bitmask로 존재 표현 → 존재하는 것만 직렬화 → 순차 읽기로 디코딩"** 을 사용한다.
 
+### 차이점 1: 데이터 배치 — Row vs Column
 
-둘 다 **"비트마스크로 존재 여부 표현 → 있는 것만 직렬화 → 순차 읽기로 디코딩"** 이라는 동일한 핵심 아이디어를 사용한다.
-
-### 차이점 1: 데이터 배치 — 행 방향 vs 열 방향
-
-**SVO는 행 방향 (마스크+데이터 인접)**:
-
+**SVO는 row-oriented (mask와 data 인접 배치)**:
 ```
-[마스크][데이터] [마스크][데이터] [마스크][데이터] ...
+[mask][data] [mask][data] [mask][data] ...
 ```
 
-**QBTiles는 열 방향 (같은 종류 값 연속)**:
-
+**QBTiles는 column-oriented (같은 타입의 값을 모아 배치)**:
 ```
-[마스크][마스크][마스크]... [offset][offset][offset]... [length][length][length]...
+[mask][mask][mask]... [offset][offset][offset]... [length][length][length]...
 ```
 
 이 차이는 **접근 패턴**에서 비롯된다:
 
+| | SVO | QBTiles |
+|---|---|---|
+| 접근 패턴 | **부분 순회** (ray casting) | **전체 디코딩** 후 Map 조회 |
+| 환경 | GPU shader, VRAM | 브라우저, 네트워크 |
+| 병목 | GPU cache miss | 네트워크 전송 크기 |
+| 최적화 목표 | 순회당 **메모리 접근 횟수** 최소화 | **파일 크기** 최소화 |
 
-|        | SVO                    | QBTiles                 |
-| ------ | ---------------------- | ----------------------- |
-| 접근 패턴  | **부분 탐색** (레이캐스팅)      | **전체 디코딩** 후 Map lookup |
-| 사용 환경  | GPU 셰이더, VRAM          | 브라우저, 네트워크              |
-| 병목     | GPU 캐시 미스              | 네트워크 전송량                |
-| 최적화 목표 | 탐색 시 **메모리 접근 횟수** 최소화 | **파일 크기** 최소화           |
+SVO shader는 프레임당 수백만 개의 ray를 쏘며, 각 ray는 서로 다른 트리 경로를 순회한다. 전체 디코딩은 비현실적이다. 따라서 mask를 data 옆에 배치하여 cache 친화적 순회를 구현한다.
 
+QBTiles 인덱스는 작다 (KB ~ 수십 MB). 전체 다운로드 후 일괄 디코딩이 현실적이다. 따라서 column-oriented 배치로 delta + gzip 압축을 극대화한다.
 
-SVO에서 셰이더는 매 프레임 수백만 개의 광선을 각기 다른 경로로 트리를 탐색한다. 인덱스를 전부 풀어놓으면 VRAM이 낭비되고, 전체 디코딩은 비현실적이다. 따라서 마스크 바로 옆에 데이터를 배치하여 탐색 경로 상의 메모리 접근을 최소화한다.
+### 차이점 2: 인덱스-데이터 관계
 
-QBTiles에서 인덱스는 수~수십 KB로 작다. 전체를 한 번에 다운로드하고 일괄 디코딩하는 것이 합리적이다. 따라서 열 방향으로 같은 종류의 값을 모아 delta + gzip 압축률을 극대화하는 것이 유리하다.
+| | SVO | QBTiles |
+|---|---|---|
+| 관계 | **인덱스 = 데이터** | **인덱스 ≠ 데이터** |
+| 설명 | 트리 자체가 VRAM 상주 데이터 | 인덱스가 offset/length 제공; 데이터는 Range Request로 조회 |
 
-### 차이점 2: 인덱스와 데이터의 관계
+SVO는 voxel 데이터(색상, 밀도)를 트리 구조 안에 내장한다. 트리를 순회하는 것이 곧 데이터 접근이다.
 
-
-|     | SVO                | QBTiles                                       |
-| --- | ------------------ | --------------------------------------------- |
-| 관계  | **인덱스 = 데이터**      | **인덱스 ≠ 데이터**                                 |
-| 설명  | 트리 자체가 VRAM 상주 데이터 | 인덱스로 offset/length 파악 후 데이터 파일에 Range Request |
-
-
-SVO는 트리 구조 자체에 복셀 데이터(색상, 밀도 등)가 포함되어 있다. 트리를 탐색하는 것이 곧 데이터에 접근하는 것이다.
-
-QBTiles는 인덱스(트리 구조 + 메타데이터)와 데이터(실제 타일 바이너리)가 **완전히 분리**되어 있다. 인덱스는 각 타일의 위치(offset, length)만 알려주고, 실제 데이터는 별도 파일에서 Range Request로 가져온다. 이 분리 덕분에 동일한 타일 구조를 공유하는 여러 데이터 파일에 인덱스를 재사용할 수 있다.
+QBTiles는 단일 `.qbt` 파일 내에서 인덱스(트리 구조 + 메타데이터)와 데이터(실제 타일 바이너리)를 **분리**한다. 인덱스 섹션이 각 타일의 위치를 알려주고, 실제 데이터는 같은 파일의 values 섹션에서 Range Request로 조회한다. index hash (SHA-256)를 통해 동일한 공간 구조를 공유하는 여러 파일 간 인덱스 재사용이 가능하다.
 
 ### 요약
 
-SVO와 QBTiles는 같은 핵심 아이디어(비트마스크 기반 트리 직렬화)를 **다른 도메인에 최적화**한 것이다:
+SVO와 QBTiles는 동일한 핵심 아이디어(bitmask 기반 트리 직렬화)를 **서로 다른 도메인에 최적화**하여 적용한다:
 
-- SVO → 3D 렌더링, VRAM 탐색, 행 방향
-- QBTiles → 지리 타일, 네트워크 전송, 열 방향
-
+- SVO → 3D 렌더링, VRAM 순회, row-oriented
+- QBTiles → 지리 타일, 네트워크 전송, column-oriented

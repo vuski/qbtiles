@@ -89,7 +89,7 @@ QBTiles indices are small (KB to tens of MB). Full download and batch decoding i
 
 SVO embeds voxel data (color, density) within the tree structure. Traversing the tree *is* accessing the data.
 
-QBTiles completely **separates** the index (tree structure + metadata) from the data (actual tile binaries). The index only tells where each tile is; actual data is fetched from a separate file via Range Request. This separation enables index reuse across multiple data files sharing the same tile structure.
+QBTiles **separates** the index (tree structure + metadata) from the data (actual tile binaries) within a single `.qbt` file. The index section tells where each tile is; actual data is fetched from the values section of the same file via Range Request. The index hash (SHA-256) enables index reuse across multiple files sharing the same spatial structure.
 
 ### Summary
 

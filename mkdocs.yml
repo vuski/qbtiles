@@ -62,8 +62,16 @@ nav:
     - Compare PMTiles: examples/05_compare_real_pmtiles.ipynb
   - 한국어:
     - 홈: ko/index.md
-    - 아키텍처: ko/architecture.md
-    - 쿼드키 인코딩: ko/quadkey-encoding.md
-    - 포맷 스펙: ko/format-spec.md
-    - 비교: ko/comparison.md
-    - 벤치마크: ko/benchmark-results.md
+    - 스펙:
+      - 아키텍처: ko/architecture.md
+      - 쿼드키 인코딩: ko/quadkey-encoding.md
+      - 포맷 스펙: ko/format-spec.md
+      - 비교: ko/comparison.md
+      - 벤치마크: ko/benchmark-results.md
+    - 타일 인덱싱을 넘어서: ko/data-container.md
+    - API 레퍼런스: ko/api-reference.md
+    - 예제:
+      - XYZ Tiles: ko/examples-xyz-tiles.md
+      - Bitmask as Data Container: ko/examples-bitmask.md
+      - Web Client: ko/examples-web-client.md
+      - Compare PMTiles: ko/examples-compare-pmtiles.md

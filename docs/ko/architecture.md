@@ -1,119 +1,145 @@
-# QBTiles 아키텍처
+# 아키텍처
 
 ## 배경
 
-PMTiles를 실무에서 사용하던 중, **동일한 공간 구조를 가진 타일셋 다수를 시계열로 다루어야 하는 상황**에서 출발했다.
+PMTiles를 **동일한 공간 구조를 공유하는 시계열 타일 데이터**와 함께 사용할 때, 타일 레이아웃이 타임스탬프 간에 동일하더라도 각 파일마다 자체 인덱스를 내장해야 한다.
 
-PMTiles는 인덱스가 데이터 파일에 내장되어 있다. 같은 영역·같은 줌레벨의 타일셋이 시간대별로 여러 개 존재할 때, 공간 구조가 동일함에도 매번 별도의 인덱스를 읽어야 한다. 이 비효율을 해결하기 위해 **인덱스를 데이터와 분리하여, 하나의 인덱스를 여러 데이터 파일에 재사용**하는 구조를 설계했다.
+PMTiles는 인덱스를 데이터 파일 내부에 내장한다. 같은 영역과 줌 레벨에 대한 타일셋이 여러 시점에 걸쳐 존재할 때, 공간 구조는 동일하지만 각 파일을 개별적으로 인덱싱해야 한다.
 
-인덱스를 분리하는 김에  자연스럽게 인코딩 방식도 새로 고안하게 되었고, 지도 타일의 본질적인 쿼드트리 구조를 그대로 활용하는 비트마스크 방식을 적용한 결과, PMTiles 대비 인덱스 크기도 줄어드는 부수적 이점을 얻게 되었다.
+이 문제를 해결하기 위한 대안적 타일 인덱스를 설계하는 과정에서, 세 가지 핵심 속성을 가진 포맷이 만들어졌다:
 
-물론 PMTiles 의 경우, 각각의 파일에 인덱스가 존재하는 이유는 각 엔트리에 해당하는 실질적 데이터를 최대한 압축해서 사용하기 때문이기도 하다. 압축을 하기 때문에 공간적 구조(특정 타일의 유무)가 동일하더라도 시계열에 따라서 각 엔트리의 시작 위치와 길이가 달라질 수 있다. 
+1. **bitmask 인코딩으로 좌표 저장을 제거한다.** 셀 존재 여부를 BFS 순서의 4-bit 마스크로 인코딩하여, 위치를 명시적으로 저장하지 않고 트리 구조로부터 암시한다. 이것만으로 PMTiles의 델타 인코딩된 타일 ID 대비 인덱스 크기가 20~30% 감소한다.
 
-그래서 여기서 이름 붙인 QBTiles의 경우, 각 타일 데이터의 크기는 다소 증가할 수 있다. 물론 이것은 시계열에 따라서 동일하게 데이터 크기를 맞출 경우에 그러하고, 독립적인 하나의 파일로 만들 경우 PMTiles 처럼 데이터를 압축하는 것은 가능하다. 
+2. **bitmask와 함께 배치된 고정 크기 값 블록이 셀 단위 Range Request를 가능하게 한다.** 값을 알려진 오프셋(`leaf_index × entry_size`)에 배치함으로써, QBTiles는 COG에 비견되는 래스터 데이터 컨테이너로 기능할 수 있다 — 다만 512×512 블록이 아닌 셀 단위 정밀도를 제공한다. columnar 레이아웃 변형은 대량 다운로드 시 압축률을 더욱 개선한다.
 
-QBTiles는 PMTiles와 완전히 교환가능한 수준의 완성된 타일 포맷은 아니다.  PMTiles 같은 경우 전세계 OSM처럼 파일이 100GB를 넘어갈 때 인덱스를 분산시켜서 단계적으로 접근하도록 했다. QBTiles의 경우 이러한 설계는 아직 적용시키지 못했다.
-
-
+3. **인덱스 해시(SHA-256)가 시계열 파일 간 재사용을 가능하게 한다.** 각 헤더는 bitmask 섹션의 해시를 저장한다. 동일한 공간 구조를 공유하는 여러 파일은 같은 해시를 가지므로, 클라이언트는 bitmask를 한 번만 다운로드하고 이후 파일은 128바이트 헤더 비교만으로 검증하여 인덱스를 완전히 건너뛸 수 있다.
 
 ## QBTiles란
 
-QBTiles (Quadkey Bitmask Tiles)는 클라우드 최적화 타일 아카이브 인덱스 포맷이다.
+QBTiles (Quadkey Bitmask Tiles)는 존재를 트리 구조로 인코딩하여 ID 저장 비용을 0으로 만드는 공간 데이터 포맷이다.
 
-지도 타일은 본질적으로 쿼드트리 구조(줌레벨 = 트리 깊이)이다. QBTiles는 이 자연스러운 구조를 그대로 활용하여, **타일 존재 여부를 4비트 비트마스크로 표현**하고 **BFS 순회로 직렬화**한다.
+지도 타일과 공간 그리드는 본질적으로 quadtree이다 (줌 레벨 = 트리 깊이). QBTiles는 이 자연적 구조를 활용하여, **셀 존재 여부를 4-bit bitmask로 인코딩**하고 **BFS 순회**로 직렬화한다.
 
-## PMTiles와의 핵심 차이
+![quadkey bitmask structure](quadkey_bitmask.png)
 
+## 세 가지 모드
 
-|         | PMTiles                    | QBTiles                 |
-| ------- | -------------------------- | ----------------------- |
-| 공간 인덱싱  | 힐베르트 곡선 (1차원 펼침)           | 쿼드트리 비트마스크 (트리 구조 유지)   |
-| 타일 식별   | tile_id delta 배열 저장        | **저장 안 함** — 비트마스크에서 복원 |
-| 빈 타일 처리 | delta 값으로 갭 기록 (바이트 비용 발생) | 비트마스크에서 0 (0비트 비용)      |
-| 인덱스 위치  | 데이터 파일에 내장                 | **독립 파일**               |
-| 인덱스 크기  | 기준                         | 5% ~40% 작음              |
+| 모드 | Flags | 용도 | 비교 대상 |
+|------|-------|------|-----------|
+| **Variable-entry** | `0x0` | 타일 아카이브 (MVT, PNG) | PMTiles |
+| **Fixed row** | `0x1` | 래스터 그리드 (Range Request) | COG (GeoTIFF) |
+| **Fixed columnar** | `0x3` | 압축 그리드 (대량 다운로드) | Parquet |
 
+## PMTiles와의 주요 차이
 
+| | PMTiles | QBTiles |
+|---|---|---|
+| 공간 인덱싱 | 힐베르트 곡선 (1D 매핑) | quadtree bitmask (트리 구조) |
+| 타일 식별 | tile_id 델타 배열 | **저장하지 않음** — bitmask에서 복원 |
+| 빈 타일 | 델타로 갭 인코딩 (바이트 소비) | 비트가 0 (비용 없음) |
+| 인덱스 위치 | 데이터 파일에 내장 | 내장, 인덱스 해시로 재사용 가능 |
+| 인덱스 크기 | 기준선 | 20~30% 더 작음 |
+| 데이터 모드 | 타일 아카이브만 | 타일 아카이브 + 래스터 그리드 + columnar |
 
+### 인덱스가 더 작은 이유
 
-### 왜 인덱스가 작아지는가
+PMTiles는 존재하는 타일 간의 **ID 갭(델타)**을 숫자로 기록한다. 타일 분포가 희소할수록 델타가 커지고 varint 바이트가 더 많이 필요하다.
 
-PMTiles는 존재하는 타일 간의 **ID 갭(delta)을 숫자로 기록**한다. 타일이 듬성듬성 분포하면 delta가 커지고 varint 바이트도 늘어난다.
+QBTiles는 부모 노드당 **4-bit bitmask**를 사용하여 네 자식의 존재 여부를 한 번에 표현한다. 존재하지 않는 자식은 단순히 0 비트이며 추가 비용이 없다. bitmask를 BFS 순서로 연결함으로써, 타일 ID를 개별 저장하지 않고도 모든 quadkey를 복원할 수 있다.
 
-QBTiles는 부모 노드의 **4비트 비트마스크**로 자식 4개의 존재 여부를 한꺼번에 표현한다. 존재하지 않는 자식은 비트가 0일 뿐, 추가 바이트 비용이 없다. 이 비트마스크를 BFS 순서로 이어 붙이면 모든 quadkey를 복원할 수 있으므로, 타일 ID를 개별 저장할 필요가 없다.
+### 해시를 통한 인덱스 재사용
 
-### 인덱스 분리의 이점
+QBT 헤더에는 bitmask 섹션의 SHA-256 해시가 포함된다. 동일한 공간 구조를 가진 시계열 파일들은 같은 해시를 공유하므로, 클라이언트는 bitmask를 한 번만 다운로드하고 이후 파일에 재사용한다.
 
-QBTiles 인덱스는 데이터 파일과 분리되어 있다. 동일한 타일 구조(같은 영역, 같은 줌레벨)를 공유하는 여러 데이터 파일에 **하나의 인덱스를 재사용**할 수 있다.
+## 관련 연구
 
-
-
-## 관련 기존 기법
-
-QBTiles의 개별 기법은 모두 기존에 존재한다. QBTiles의 가치는 이를 지리 타일 인덱싱에 실용적으로 조합한 것이다.
+QBTiles의 개별 기법은 모두 기존에 존재한다. QBTiles의 가치는 이들을 지리 데이터에 실용적으로 결합한 데 있다.
 
 ### Sparse Voxel Octree (SVO)
 
-QBTiles와 가장 직접적으로 같은 아이디어의 3D 버전. 상세 비교는 [comparison.md](comparison.md) 참조.
+가장 직접적으로 유사한 기법 — 3D에서의 동일한 아이디어. 자세한 내용은 [비교](comparison.md) 참조.
 
 ### LOUDS (Level-Order Unary Degree Sequence)
 
-트리 토폴로지를 BFS 순서로 최소 비트로 인코딩하는 간결 자료구조(succinct data structure). QBTiles의 비트마스크 BFS 직렬화와 유사한 학술적 배경.
+최소 비트로 BFS 순서의 트리 토폴로지를 인코딩하는 간결 자료구조. QBTiles의 bitmask BFS 직렬화와 유사한 학술적 기반.
 
-### Hierarchical Bitmap
+### 계층적 비트맵
 
-데이터베이스에서 다단계 비트맵 인덱스로 사용. 상위 비트맵에서 1인 영역만 하위 비트맵이 존재하는 계층 구조.
+데이터베이스에서 다계층 비트맵 인덱스로 사용된다. 부모 비트가 1인 곳에만 자식 비트맵이 존재하는 계층 구조.
 
-### JBIG2 / JPEG 2000
+## 구성 요소
 
-이미지 코딩에서 쿼드트리 분할로 영역의 데이터 존재 여부를 재귀적으로 인코딩.
+### Python 작성기 (`src/python/qbtiles.py`)
 
-## 컴포넌트
+QBT 파일 생성 및 직렬화:
 
-### Python 빌더 (`src/python/qbtiles.py`)
+- **`build()`** — 통합 빌더: 인자로 모드 자동 판단 (`folder` → variable, `columns` → columnar, `values` → fixed), `cell_size`로 zoom 자동 계산, 좌표에서 origin/extent 자동 계산
+- **`build(geotiff=)`** — GeoTIFF를 QBTiles로 직접 변환 (cell_size, CRS, origin, extent, nodata 자동 감지)
+- quadtree 구성: `build_quadtree()`
+- bitmask 직렬화: `serialize_bitmask()`
+- 파일 작성기: `write_qbt_variable()`, `write_qbt_fixed()`, `write_qbt_columnar()`
+- 헤더 파싱: `read_qbt_header()`
+- quadkey 변환: `tile_to_quadkey_int64()`, `quadkey_int64_to_zxy()` 등
 
-인덱스 구축 및 직렬화/역직렬화:
+### TypeScript 리더 (`src/typescript/`)
 
-- 쿼드트리 구축: `build_quadtree()`
-- 인덱스 직렬화: `write_tree_bitmask_to_single_file()`
-- 인덱스 역직렬화: `deserialize_quadtree_index()`
-- 쿼드키 변환: `tile_to_quadkey_int64()`, `quadkey_int64_to_zxy()` 등
-- PMTiles 비교: `serialize_directory()` (크기 비교용)
+브라우저 측 QBT 읽기 및 공간 쿼리:
 
-### TypeScript 리더 (`src/typescript/qbtiles.ts`)
-
-브라우저에서 인덱스를 역직렬화:
-
-- `deserializeQuadtreeIndex()` → `Map<bigint, QBTilesIndex>`
-- `quadkeyInt64ToZXY()`, `tileToQuadkeyInt64()` 좌표 변환
+- **`openQBT(url)`** → `QBT` 클래스 — 통합 로더, 헤더 flags에서 모드 자동 감지
+- `QBT.getTile(z, x, y)` — 타일 데이터 가져오기 (variable 모드)
+- `QBT.query(bbox)` — 공간 쿼리 (전체 모드)
+- `QBT.columns` — 컬럼 값 (columnar 모드)
+- `QBT.addProtocol(maplibregl)` — MapLibre 커스텀 프로토콜 (variable 모드)
+- `QBT.toWGS84(x, y)` / `QBT.fromWGS84(lng, lat)` — proj4를 통한 CRS 변환
+- `registerCRS(epsg, proj4Def)` — 커스텀 CRS 정의 등록
+- 저수준: `parseQBTHeader()`, `queryBbox()`, `mergeRanges()`, `fetchRanges()`, `readColumnarValues()`
 
 ### C++ 인코더 (`src/cpp/`)
 
-PMTiles 힐베르트 타일 ID를 QBTiles quadkey int64로 배치 변환. pybind11을 통해 Python numpy 배열과 연동.
-
-빌드된 `.pyd` 파일(`tileid_encoder.cp312-win_amd64.pyd`)이 `examples/`에 포함되어 있으므로, Python 3.12 + Windows 환경이면 CMake 빌드 없이 `import tileid_encoder`로 바로 사용 가능. 다른 환경에서는 `src/cpp/`에서 pybind11로 직접 빌드해야 한다.
+PMTiles 힐베르트 타일 ID를 QBTiles quadkey int64로 일괄 변환. pybind11을 통해 Python numpy 배열과 연동.
 
 ## 데이터 흐름
 
-### 빌드 타임
+### Variable-entry (타일 아카이브)
 
 ```
-타일 데이터 파일들
-  → quadkey 기준 정렬
-  → 하나의 데이터 파일로 합치기 (연속 저장)
-  → 쿼드트리 빌드 (quadkey_info → QuadTreeNode 트리)
-  → BFS 비트마스크 직렬화 + 열 방향 varint + gzip 압축
-  → index.gz
+Build time:
+  qbt.build("output.qbt", folder="tiles/")
+    → Sort by quadkey
+    → Build quadtree → serialize_bitmask() + varint arrays
+    → write_qbt_variable() → single .qbt file
+      [header][gzip(bitmask + varints)][tile_data...]
+
+Runtime:
+  openQBT(url)
+    → fetch header (128B) → check index hash cache
+    → fetch bitmask section → gzip decompress → build index
+    → getTile(z, x, y) → Range Request for tile data
+    → addProtocol(maplibregl) → MapLibre custom protocol
 ```
 
-### 런타임 (클라이언트)
+### Fixed-entry (래스터 그리드)
 
 ```
-fetch index.gz
-  → gzip 압축 해제
-  → 비트마스크에서 quadkey 복원 + varint에서 offset/length 복원
-  → Map<quadkey_int64, {offset, length, ...}>
-  → 뷰포트의 타일 좌표 → quadkey_int64로 변환 → Map에서 lookup
-  → HTTP Range Request로 데이터 파일에서 해당 타일 로딩
-```
+Build time:
+  qbt.build("output.qbt", coords=..., values=..., cell_size=1000)
+    → Auto-calculate zoom/origin/extent, snap coords to grid
+    → Build quadtree → serialize_bitmask()
+    → write_qbt_fixed() → single .qbt file
+      [header][gzip(bitmask)][raw values]
 
+  qbt.build("output.qbt.gz", coords=..., columns=..., cell_size=100, crs=5179)
+    → write_qbt_columnar() → single .qbt.gz file
+      gzip([header][gzip(bitmask)][col1][col2]...)
+
+Runtime (fixed row):
+  openQBT(url)
+    → fetch header → fetch bitmask via Range Request → build index
+    → query(bbox) → leaf indices → Range Request per cell
+
+Runtime (columnar):
+  openQBT(url)
+    → fetch entire .qbt.gz → decompress → parse header + bitmask + columns
+    → columns → Map<fieldName, number[]>
+    → query(bbox) → in-memory lookup
+```

@@ -3,18 +3,12 @@ import { createRoot } from 'react-dom/client';
 import maplibregl from 'maplibre-gl';
 import { MapShell } from '../../components/MapShell';
 import { InfoPanel } from '../../components/InfoPanel';
-import {
-  loadQBTVariable,
-  deserializeQuadtreeIndex,
-  tileToQuadkeyInt64,
-  type QBTilesIndex,
-} from 'qbtiles';
+import { openQBT, type QBT } from 'qbtiles';
 
 const QBT_URL = './korea_tiles.qbt';
-const DATA_URL = './korea_tiles.data';
 
 interface Stats {
-  indexSize: number;
+  fileSize: number;
   entries: number;
   tilesLoaded: number;
   bytesRequested: number;
@@ -22,7 +16,7 @@ interface Stats {
 
 function App() {
   const [stats, setStats] = useState<Stats>({
-    indexSize: 0,
+    fileSize: 0,
     entries: 0,
     tilesLoaded: 0,
     bytesRequested: 0,
@@ -30,18 +24,19 @@ function App() {
   const [zoom, setZoom] = useState(7);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const indexRef = useRef<Map<bigint, QBTilesIndex> | null>(null);
+  const qbtRef = useRef<QBT | null>(null);
 
-  // Load index on mount
+  // Load QBT on mount
   useEffect(() => {
     (async () => {
       try {
-        const { header, buffer } = await loadQBTVariable(QBT_URL);
-        setStats((s) => ({ ...s, indexSize: header.bitmaskLength + header.headerSize }));
-
-        const index = deserializeQuadtreeIndex(buffer);
-        indexRef.current = index;
-        setStats((s) => ({ ...s, entries: index.size }));
+        const qbt = await openQBT(QBT_URL);
+        qbtRef.current = qbt;
+        setStats((s) => ({
+          ...s,
+          fileSize: qbt.header.bitmaskLength + qbt.header.headerSize + qbt.header.valuesLength,
+          entries: qbt.leafCount,
+        }));
         setLoading(false);
       } catch (e) {
         setError(String(e));
@@ -53,49 +48,36 @@ function App() {
   const handleMapLoad = useCallback(
     (map: maplibregl.Map) => {
       const tryAdd = () => {
-        const index = indexRef.current;
-        if (!index) {
+        const qbt = qbtRef.current;
+        if (!qbt) {
           setTimeout(tryAdd, 200);
           return;
         }
 
-        // Register custom protocol for MVT tiles
+        // Register custom protocol — tiles are fetched via Range Request internally
         (maplibregl as any).addProtocol(
           'qbtiles',
           async (params: any, abortController: AbortController) => {
-            // params.url: "qbtiles:///7/109/49"
             const parts = params.url.replace('qbtiles://', '').split('/').filter(Boolean);
             const [z, x, y] = parts.map(Number);
-            const qk = tileToQuadkeyInt64(z, x, y);
-            const entry = index.get(qk);
 
-            if (!entry) {
-              return { data: new ArrayBuffer(0) };
-            }
+            const data = await qbt.getTile(z, x, y, abortController.signal);
+            if (!data) return { data: new ArrayBuffer(0) };
 
             setStats((s) => ({
               ...s,
               tilesLoaded: s.tilesLoaded + 1,
-              bytesRequested: s.bytesRequested + entry.length,
+              bytesRequested: s.bytesRequested + data.byteLength,
             }));
 
-            const res = await fetch(DATA_URL, {
-              headers: {
-                Range: `bytes=${entry.offset}-${entry.offset + entry.length - 1}`,
-              },
-              signal: abortController.signal,
-            });
-
-            let data = await res.arrayBuffer();
-
-            // Decompress gzip MVT
+            // Decompress gzip MVT if needed
             const bytes = new Uint8Array(data);
             if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
               const ds = new DecompressionStream('gzip');
               const writer = ds.writable.getWriter();
               writer.write(bytes);
               writer.close();
-              data = await new Response(ds.readable).arrayBuffer();
+              return { data: await new Response(ds.readable).arrayBuffer() };
             }
 
             return { data };
@@ -171,21 +153,13 @@ function App() {
           const n = Math.pow(2, z);
           const features: GeoJSON.Feature[] = [];
 
-          const xMin = Math.max(
-            0,
-            Math.floor(((bounds.getWest() + 180) / 360) * n),
-          );
-          const xMax = Math.min(
-            n - 1,
-            Math.floor(((bounds.getEast() + 180) / 360) * n),
-          );
+          const xMin = Math.max(0, Math.floor(((bounds.getWest() + 180) / 360) * n));
+          const xMax = Math.min(n - 1, Math.floor(((bounds.getEast() + 180) / 360) * n));
 
           const latToTileY = (lat: number) => {
             const rad = (lat * Math.PI) / 180;
             return Math.floor(
-              ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) /
-                2) *
-                n,
+              ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n,
             );
           };
 
@@ -195,10 +169,7 @@ function App() {
           const tileToLng = (x: number) => (x / n) * 360 - 180;
           const tileToLat = (y: number) => {
             const nPI = Math.PI - (2 * Math.PI * y) / n;
-            return (
-              (180 / Math.PI) *
-              Math.atan(0.5 * (Math.exp(nPI) - Math.exp(-nPI)))
-            );
+            return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(nPI) - Math.exp(-nPI)));
           };
 
           for (let tx = xMin; tx <= xMax; tx++) {
@@ -212,9 +183,7 @@ function App() {
                 properties: {},
                 geometry: {
                   type: 'Polygon',
-                  coordinates: [
-                    [[w, n_], [e, n_], [e, s], [w, s], [w, n_]],
-                  ],
+                  coordinates: [[[w, n_], [e, n_], [e, s], [w, s], [w, n_]]],
                 },
               });
             }
@@ -256,7 +225,7 @@ function App() {
           <div style={{ margin: '8px 0 0', fontSize: 13 }}>
             <div style={{ marginBottom: 6, fontSize: 12, color: '#aaa' }}>
               File: Administrative boundaries of South Korea<br/>
-              Format: MVT &middot; Size: {fmt(stats.indexSize)} (index) + 31 MB (data)
+              Format: MVT &middot; Size: {fmt(stats.fileSize)} (single .qbt)
             </div>
             <div>Zoom: {zoom}</div>
             <div>Entries: {stats.entries.toLocaleString()}</div>

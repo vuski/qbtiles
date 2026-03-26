@@ -6,7 +6,7 @@ It stores tile/cell existence as **4-bit bitmasks** in BFS order. The position o
 
 ## Why QBTiles?
 
-- **Smaller file, finer access**: 30% smaller index than PMTiles, per-cell Range Request vs COG's 512×512 blocks. [See comparison →](data-container.md)
+- **Smaller file, finer access**: 20–30% smaller index than PMTiles, per-cell Range Request vs COG's 512×512 blocks. [See comparison →](data-container.md)
 - **Zero cost for empty space**: Bitmask tree stores only existing cells — no wasted bytes on nodata
 - **Three modes**: Tile archives (variable-entry), raster grids (fixed row), compressed grids (fixed columnar)
 - **Index hash**: SHA-256 enables index reuse across time-series files with identical spatial structure
@@ -21,97 +21,59 @@ npm install qbtiles    # TypeScript — read & query in the browser
 
 ## Quick Start
 
-### Python — Write a QBT File
+### Python — Build QBT Files
 
 ```python
 import qbtiles as qbt
-import struct
 
-# 1. Build quadtree from z/x/y tile coordinates
-#    entries: [(quadkey_int64, filepath, byte_offset, byte_length, run_length), ...]
-entries = [
-    (qbt.tile_to_quadkey_int64(5, 27, 12), "tiles/5/27/12.mvt", 0, 4820, 1),
-    (qbt.tile_to_quadkey_int64(5, 27, 13), "tiles/5/27/13.mvt", 4820, 3210, 1),
-    # ...
-]
-root = qbt.build_quadtree(entries)
+# Mode 1: Tile archive — from a folder of z/x/y tiles (e.g., tiles/5/27/12.mvt)
+qbt.build("korea_tiles.qbt", folder="tiles/")
 
-# 2. Serialize bitmask
-bitmask, leaf_count = qbt.serialize_bitmask(root)
+# Mode 2: Columnar — coordinates + multiple value columns
+# coords: list of (x, y) in the target CRS
+# columns: dict of column_name → value list (same length as coords)
+# cell_size: grid cell size in CRS units (meters for EPSG:5179)
+# → zoom, origin, extent are auto-calculated from coords and cell_size
+qbt.build("population.qbt.gz",
+    coords=list(zip(df["x"], df["y"])),         # [(950000, 1950000), ...]
+    columns={"total": totals, "male": males, "female": females},
+    cell_size=100, crs=5179)                     # 100m grid, Korean CRS
 
-# 3a. Fixed row — one float32 value per cell (for Range Request)
-#     values_bytes: leaf_count × entry_size bytes, same order as bitmask leaves
-values = [52.3, 41.2, 0.0, 31.8]  # population per cell
-values_bytes = struct.pack(f"<{leaf_count}f", *values)
+# Mode 3: Fixed row — coordinates + single value array (for Range Request)
+# values: flat list of numbers (one per cell)
+# entry_size: bytes per cell (4 for float32)
+qbt.build("global_pop.qbt",
+    coords=list(zip(lons, lats)),                # [(-73.99, 40.75), ...]
+    values=population,                           # [52.3, 41.2, ...]
+    cell_size=1000, entry_size=4,                # 1km grid, 4 bytes/cell
+    fields=[{"type": qbt.TYPE_FLOAT32, "name": "pop"}])
 
-qbt.write_qbt_fixed("population.qbt", bitmask, values_bytes,
-    zoom=16, crs=4326,
-    origin_x=-180.0, origin_y=84.0, extent_x=360.0, extent_y=144.0,
-    entry_size=4,
-    fields=[{"type": qbt.TYPE_FLOAT32, "offset": 0, "name": "population"}])
-
-# 3b. Columnar — multiple varint columns (gzip-compressed whole file)
-#     Each list has leaf_count elements in bitmask leaf order
-totals  = [523, 412, 0, 318]   # total population per cell
-males   = [261, 205, 0, 159]   # male population per cell
-females = [262, 207, 0, 159]   # female population per cell
-
-qbt.write_qbt_columnar("population.qbt.gz", bitmask,
-    columns=[(qbt.TYPE_VARINT, totals), (qbt.TYPE_VARINT, males), (qbt.TYPE_VARINT, females)],
-    leaf_count=leaf_count, zoom=13, crs=5179,
-    origin_x=700000.0, origin_y=1300000.0, extent_x=819200.0, extent_y=819200.0,
-    fields=[
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "total"},
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "male"},
-        {"type": qbt.TYPE_VARINT, "offset": 0, "name": "female"},
-    ])
-
-# Read back header
-header = qbt.read_qbt_header("population.qbt")
-# header['zoom'], header['fields'], header['index_hash'], ...
+# GeoTIFF → QBTiles conversion (cell_size, CRS, extent auto-detected)
+qbt.build("worldpop.qbt", geotiff="worldpop_2025.tif")
 ```
 
-### TypeScript — Read & Query (Fixed Row, Range Request)
+### TypeScript — Read & Query
 
 ```typescript
-import { loadQBT, queryBbox, mergeRanges, fetchRanges } from 'qbtiles';
+import { openQBT } from 'qbtiles';
 
-const url = 'https://example.com/population.qbt';
+// openQBT reads the header, detects the mode, and loads data automatically.
 
-// Load index (fetches 128B header + bitmask, hash-cached)
-const { header, index } = await loadQBT(url);
+// Mode 1: Tile archive — serve MVT/PNG tiles from a single .qbt file
+const tiles = await openQBT('korea_tiles.qbt');
+const tile = await tiles.getTile(7, 109, 49);  // ArrayBuffer (gzip MVT) | null
+tiles.addProtocol(maplibregl, 'qbt');           // one-line MapLibre integration
 
-// Spatial query → fetch only matching cells via Range Request
-const grid = { zoom: 16, originLon: -180, originLat: 84, pixelDeg: 1/120, rasterCols: 43200, rasterRows: 17280 };
-const result = queryBbox(index, [126.8, 37.4, 127.2, 37.7], grid);
-const ranges = mergeRanges(result.leafIndices, 256, header.entrySize);
-const { values } = await fetchRanges(url, ranges, undefined, undefined, header.valuesOffset);
-// values.get(leafIndex) → population value
-```
+// Mode 3: Fixed row — per-cell Range Request on a remote file
+const grid = await openQBT('https://cdn.example.com/global_pop.qbt');
+const cells = await grid.query([126, 35, 128, 37]);  // [west, south, east, north]
+// → Array<{ position: [lng, lat], value: number }>
 
-### TypeScript — Read Columnar (Whole File)
-
-```typescript
-import { parseQBTHeader, deserializeBitmaskIndex, readColumnarValues } from 'qbtiles';
-
-// Fetch and decompress .qbt.gz
-const res = await fetch('https://example.com/population.qbt.gz');
-const compressed = await res.arrayBuffer();
-const ds = new DecompressionStream('gzip');
-const writer = ds.writable.getWriter();
-writer.write(new Uint8Array(compressed));
-writer.close();
-const buffer = await new Response(ds.readable).arrayBuffer();
-
-// Parse header → build index → read columnar values
-const header = parseQBTHeader(buffer);
-const index = await deserializeBitmaskIndex(buffer, header.zoom, undefined,
-  { bitmaskByteLength: header.bitmaskLength, bufferOffset: header.headerSize });
-const columns = readColumnarValues(buffer, header, index.totalLeaves);
-// columns: Map<string, number[]> — field name → values in BFS leaf order
-// columns.get('total')  → [523, 412, 0, 318, ...]  (931,495 cells)
-// columns.get('male')   → [261, 205, 0, 159, ...]
-// columns.get('female') → [262, 207, 0, 159, ...]
+// Mode 2: Columnar — downloads entire file, queries in memory
+const pop = await openQBT('population.qbt.gz');
+pop.columns!.get('total')!;                     // number[931495] — direct access
+const result = await pop.query([126, 35, 128, 37]);
+// → Array<{ position: [lng, lat], values: {total: 523, male: 261, female: 262} }>
 ```
 
 ## Three Modes
@@ -126,13 +88,12 @@ const columns = readColumnarValues(buffer, header, index.totalLeaves);
 
 ```
 src/
-  python/qbtiles.py          — Python library: quadtree build, QBT write/read
-  typescript/qbtiles.ts      — TypeScript library: re-exports all modules
+  python/qbtiles.py          — Python library: build(), quadtree, QBT write/read
+  typescript/qbtiles.ts      — TypeScript entry point: re-exports all modules
+  typescript/qbt.ts          — Unified reader: QBT class, openQBT(), registerCRS()
   typescript/qbt-header.ts   — Header parser (parseQBTHeader)
-  typescript/qbt-reader.ts   — High-level reader (loadQBT, readColumnarValues)
+  typescript/qbt-reader.ts   — Low-level reader (loadQBTVariable, loadQBTColumnar)
   typescript/bitmask-index.ts — Lazy tree index, spatial query, Range Request
-  typescript/bitmask-values.ts — Legacy adaptive bit-width decoder
-  typescript/custom-crs.ts   — Custom CRS quadkey decoder
   typescript/types.ts        — Shared types (BBox, GridParams, coord utils)
   cpp/                       — Native Hilbert→quadkey encoder (pybind11, optional)
 demo-src/                    — Vite + React demo source (3 pages + landing)

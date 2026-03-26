@@ -11,6 +11,7 @@ export { type BitmaskEntry, deserializeBitmaskValues } from './bitmask-values';
 export { decodeCustomQuadkey } from './custom-crs';
 export { type QBTHeader, type QBTFieldDescriptor, parseQBTHeader, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32, TYPE_FLOAT64, TYPE_INT64, TYPE_UINT64, TYPE_VARINT, TYPE_SIZE } from './qbt-header';
 export { type LoadResult, type VariableLoadResult, loadQBT, loadQBTVariable, fetchTile, readColumnarValues, clearIndexCache } from './qbt-reader';
+export { QBT, openQBT, registerCRS, type QBTMode, type QBTQueryStats } from './qbt';
 
 // --- Tile archive index (original) ---
 

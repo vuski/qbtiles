@@ -1,17 +1,27 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { type BBox, splitAntimeridian, WORLD_POP_GRID } from '../../lib/geo-constants';
+import { type BBox } from '../../lib/geo-constants';
 import {
-  type BitmaskIndex,
+  openQBT,
+  type QBT,
   type QBTCellData,
   type QBTChunk,
-  type QBTHeader,
   queryBbox,
   mergeRanges,
   fetchRanges,
   queryResultToCells,
   queryResultToChunks,
-  loadQBT,
+  splitAntimeridian,
 } from 'qbtiles';
+
+// Re-export grid params for COG comparison
+export const WORLD_POP_GRID = {
+  zoom: 16,
+  originLon: -180,
+  originLat: 84,
+  pixelDeg: 360 / 43200,
+  rasterCols: 43200,
+  rasterRows: 17280,
+};
 
 export interface QBTStats {
   requests: number;
@@ -46,33 +56,30 @@ export function useQBTilesQuery(qbtUrl: string) {
     stats: null,
   });
 
-  const indexRef = useRef<BitmaskIndex | null>(null);
-  const headerRef = useRef<QBTHeader | null>(null);
+  const qbtRef = useRef<QBT | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    // Guard against StrictMode double-mount
-    if (indexRef.current) {
+    if (qbtRef.current) {
       setState((s) => ({
         ...s,
         indexLoading: false,
-        indexProgress: `Ready: ${indexRef.current!.totalLeaves.toLocaleString()} cells`,
+        indexProgress: `Ready: ${qbtRef.current!.leafCount.toLocaleString()} cells`,
       }));
       return;
     }
 
     (async () => {
       try {
-        const { header, index, indexBytes } = await loadQBT(qbtUrl, (msg) =>
+        const qbt = await openQBT(qbtUrl, (msg) =>
           setState((s) => ({ ...s, indexProgress: msg })),
         );
-        indexRef.current = index;
-        headerRef.current = header;
+        qbtRef.current = qbt;
         setState((s) => ({
           ...s,
           indexLoading: false,
-          indexBytes,
-          indexProgress: `Ready: ${index.totalLeaves.toLocaleString()} cells`,
+          indexBytes: qbt.header.bitmaskLength,
+          indexProgress: `Ready: ${qbt.leafCount.toLocaleString()} cells`,
         }));
       } catch (err: any) {
         setState((s) => ({
@@ -86,9 +93,13 @@ export function useQBTilesQuery(qbtUrl: string) {
 
   const query = useCallback(
     async (bbox: BBox, onProgress?: (p: { request: number; bytes: number }) => void): Promise<{ bytes: number } | undefined> => {
-      const index = indexRef.current;
-      const header = headerRef.current;
-      if (!index || !header) return undefined;
+      const qbt = qbtRef.current;
+      if (!qbt) return undefined;
+
+      // Access internal index and grid for low-level query (demo needs chunks for visualization)
+      const index = (qbt as any)._bitmaskIndex;
+      const header = qbt.header;
+      if (!index) return undefined;
 
       abortRef.current?.abort();
       const ac = new AbortController();
@@ -105,7 +116,7 @@ export function useQBTilesQuery(qbtUrl: string) {
 
       try {
         const t0 = performance.now();
-        const bboxes = splitAntimeridian(bbox);
+        const bboxes = splitAntimeridian(bbox as any);
         let allLeafIndices: number[] = [];
         let allRows: number[] = [];
         let allCols: number[] = [];
