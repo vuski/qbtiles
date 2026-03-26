@@ -169,7 +169,7 @@ MVT vector tiles served via QBTiles index + Range Request. Administrative bounda
 ### [Range Request Comparison](https://vuski.github.io/qbtiles/demo/range-request/) — Fixed row (0x1)
 Split-screen comparison: QBTiles cell-level vs COG block-level Range Request on WorldPop 1km global population.
 
-<video src="https://raw.githubusercontent.com/vuski/qbtiles/main/docs/comparison.mp4" controls autoplay loop muted width="100%"></video>
+[![Range Request Comparison](docs/image-range-request.png)](https://vuski.github.io/qbtiles/demo/range-request/)
 
 ## Related Work
 
