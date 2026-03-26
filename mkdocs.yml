@@ -54,6 +54,7 @@ nav:
     - Comparison: comparison.md
     - Benchmark: benchmark-results.md
   - Beyond Tile Indexing: data-container.md
+  - API Reference: api-reference.md
   - Examples:
     - XYZ Tiles: examples/01_xyz_tiles.ipynb
     - Bitmask as Data Container: examples/02_bitmask_as_data_container.ipynb

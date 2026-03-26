@@ -345,10 +345,17 @@ def expand_quadkey(parent_key, bitmask):
     return children
 
 
-def deserialize_quadtree_index(filepath):
-    """gzip 압축된 바이너리 인덱스 파일을 읽어 엔트리 리스트로 복원한다."""
-    with gzip.open(filepath, "rb") as f:
-        b = f.read()
+def deserialize_quadtree_index(filepath_or_bytes):
+    """인덱스를 읽어 엔트리 리스트로 복원한다.
+
+    Args:
+        filepath_or_bytes: gzip 파일 경로(str) 또는 decompressed bytes.
+    """
+    if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        b = filepath_or_bytes
+    else:
+        with gzip.open(filepath_or_bytes, "rb") as f:
+            b = f.read()
 
     b_io = BytesIO(b)
     bitmask_len = int.from_bytes(b_io.read(4), "big")
@@ -928,8 +935,9 @@ def write_qbt_variable(output_path, root, data_path=None,
             write_varint(varint_io, offsets_list[i] + 1)
     varint_bytes = varint_io.getvalue()
 
-    # Variable-entry: bitmask + varints 합쳐서 gzip (통째로 한 번 받으니까)
-    index_bytes = bitmask_bytes + varint_bytes
+    # Variable-entry: 4B prefix + bitmask + varints 합쳐서 gzip
+    # 4B prefix = bitmask byte length (big-endian, for deserializeQuadtreeIndex compatibility)
+    index_bytes = len(bitmask_bytes).to_bytes(4, byteorder="big") + bitmask_bytes + varint_bytes
     compressed_index = gzip.compress(index_bytes)
 
     flags = 0x0  # bit0=0 (variable), bit1=0 (row)

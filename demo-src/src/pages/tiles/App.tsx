@@ -4,12 +4,13 @@ import maplibregl from 'maplibre-gl';
 import { MapShell } from '../../components/MapShell';
 import { InfoPanel } from '../../components/InfoPanel';
 import {
+  loadQBTVariable,
   deserializeQuadtreeIndex,
   tileToQuadkeyInt64,
   type QBTilesIndex,
 } from 'qbtiles';
 
-const INDEX_URL = './korea_tiles.idx.gz';
+const QBT_URL = './korea_tiles.qbt';
 const DATA_URL = './korea_tiles.data';
 
 interface Stats {
@@ -35,22 +36,8 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(INDEX_URL);
-        const raw = await res.arrayBuffer();
-        setStats((s) => ({ ...s, indexSize: raw.byteLength }));
-
-        // Decompress gzip if needed
-        const bytes = new Uint8Array(raw);
-        let buffer: ArrayBuffer;
-        if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
-          const ds = new DecompressionStream('gzip');
-          const writer = ds.writable.getWriter();
-          writer.write(bytes);
-          writer.close();
-          buffer = await new Response(ds.readable).arrayBuffer();
-        } else {
-          buffer = raw;
-        }
+        const { header, buffer } = await loadQBTVariable(QBT_URL);
+        setStats((s) => ({ ...s, indexSize: header.bitmaskLength + header.headerSize }));
 
         const index = deserializeQuadtreeIndex(buffer);
         indexRef.current = index;

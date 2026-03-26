@@ -89,6 +89,74 @@ export async function loadQBT(
 }
 
 // ---------------------------------------------------------------------------
+// Load QBT Variable-entry (tile archive)
+// ---------------------------------------------------------------------------
+export interface VariableLoadResult {
+  header: QBTHeader;
+  buffer: ArrayBuffer;  // decompressed index section (bitmask + varints, no 4B prefix)
+}
+
+/**
+ * Load a variable-entry QBT file: fetch full file → decompress index section.
+ * Returns the decompressed buffer for use with deserializeQuadtreeIndex(buffer, { bitmaskByteLength }).
+ *
+ * Usage:
+ *   const { header, buffer } = await loadQBTVariable(url);
+ *   const index = deserializeQuadtreeIndex(buffer, { bitmaskByteLength: header.bitmaskByteLength });
+ */
+export async function loadQBTVariable(
+  url: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<VariableLoadResult> {
+  onProgress?.('Downloading...');
+  const res = await fetch(url, { signal });
+  const raw = await res.arrayBuffer();
+
+  // Parse header
+  const header = parseQBTHeader(raw);
+
+  // Extract index section (gzip-compressed bitmask + varints)
+  const indexCompressed = new Uint8Array(raw, header.headerSize, header.bitmaskLength);
+
+  // Decompress
+  onProgress?.('Decompressing index...');
+  let buffer: ArrayBuffer;
+  if (indexCompressed[0] === 0x1f && indexCompressed[1] === 0x8b) {
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    writer.write(indexCompressed);
+    writer.close();
+    buffer = await new Response(ds.readable).arrayBuffer();
+  } else {
+    buffer = indexCompressed.buffer.slice(
+      header.headerSize, header.headerSize + header.bitmaskLength
+    );
+  }
+
+  return { header, buffer };
+}
+
+// ---------------------------------------------------------------------------
+// Fetch a single tile from a variable-entry archive
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch a single tile's data via HTTP Range Request.
+ */
+export async function fetchTile(
+  dataUrl: string,
+  entry: { offset: number; length: number },
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  const res = await fetch(dataUrl, {
+    headers: { Range: `bytes=${entry.offset}-${entry.offset + entry.length - 1}` },
+    signal,
+  });
+  return res.arrayBuffer();
+}
+
+// ---------------------------------------------------------------------------
 // Columnar value reader
 // ---------------------------------------------------------------------------
 

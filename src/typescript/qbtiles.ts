@@ -10,7 +10,7 @@ export { type BitmaskIndex, type ByteRange, type QBTCellData, type QBTChunk, typ
 export { type BitmaskEntry, deserializeBitmaskValues } from './bitmask-values';
 export { decodeCustomQuadkey } from './custom-crs';
 export { type QBTHeader, type QBTFieldDescriptor, parseQBTHeader, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32, TYPE_FLOAT64, TYPE_INT64, TYPE_UINT64, TYPE_VARINT, TYPE_SIZE } from './qbt-header';
-export { type LoadResult, loadQBT, readColumnarValues, clearIndexCache } from './qbt-reader';
+export { type LoadResult, type VariableLoadResult, loadQBT, loadQBTVariable, fetchTile, readColumnarValues, clearIndexCache } from './qbt-reader';
 
 // --- Tile archive index (original) ---
 
@@ -170,4 +170,76 @@ export function deserializeQuadtreeIndex(
   }
 
   return entryMap;
+}
+
+// --- Tile archive high-level API ---
+
+/**
+ * High-level tile archive reader.
+ *
+ * Usage:
+ *   const archive = new QBTilesArchive('tiles.qbt', 'tiles.data');
+ *   await archive.load();
+ *   const tile = await archive.getTile(3, 4, 2);
+ *
+ * Or as MapLibre protocol:
+ *   archive.addProtocol(maplibregl, 'qbtiles');
+ *   map.addSource('src', { type: 'vector', tiles: ['qbtiles:///{z}/{x}/{y}'] });
+ */
+export class QBTilesArchive {
+  private qbtUrl: string;
+  private dataUrl: string;
+  private index: Map<bigint, QBTilesIndex> | null = null;
+
+  constructor(qbtUrl: string, dataUrl: string) {
+    this.qbtUrl = qbtUrl;
+    this.dataUrl = dataUrl;
+  }
+
+  /** Load and parse the .qbt index. Call once before getTile(). */
+  async load(onProgress?: (msg: string) => void): Promise<number> {
+    const { loadQBTVariable } = await import('./qbt-reader');
+    const { buffer } = await loadQBTVariable(this.qbtUrl, onProgress);
+    this.index = deserializeQuadtreeIndex(buffer);
+    return this.index.size;
+  }
+
+  /** Fetch a single tile by z/x/y. Returns null if tile doesn't exist. */
+  async getTile(z: number, x: number, y: number, signal?: AbortSignal): Promise<ArrayBuffer | null> {
+    if (!this.index) throw new Error('Call load() first');
+    const qk = tileToQuadkeyInt64(z, x, y);
+    const entry = this.index.get(qk);
+    if (!entry) return null;
+    const { fetchTile } = await import('./qbt-reader');
+    return fetchTile(this.dataUrl, entry, signal);
+  }
+
+  /** Number of entries in the index. */
+  get size(): number {
+    return this.index?.size ?? 0;
+  }
+
+  /** Look up an entry without fetching. */
+  getEntry(z: number, x: number, y: number): QBTilesIndex | undefined {
+    if (!this.index) throw new Error('Call load() first');
+    return this.index.get(tileToQuadkeyInt64(z, x, y));
+  }
+
+  /**
+   * Register as a MapLibre custom protocol.
+   * After calling this, use tiles: ['protocol:///{z}/{x}/{y}'] in addSource.
+   */
+  addProtocol(maplibregl: any, protocol: string = 'qbtiles'): void {
+    if (!this.index) throw new Error('Call load() first');
+    const archive = this;
+    (maplibregl as any).addProtocol(
+      protocol,
+      async (params: any, abortController: AbortController) => {
+        const parts = params.url.replace(`${protocol}://`, '').split('/').filter(Boolean);
+        const [z, x, y] = parts.map(Number);
+        const data = await archive.getTile(z, x, y, abortController.signal);
+        return { data: data ?? new ArrayBuffer(0) };
+      },
+    );
+  }
 }
