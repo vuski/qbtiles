@@ -30,6 +30,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install root dependencies
+        run: npm ci
+
       - name: Build demo pages
         run: |
           cd demo-src
