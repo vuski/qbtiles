@@ -252,7 +252,7 @@ export function queryBbox(index: BitmaskIndex, bbox: BBox, grid: GridParams): Qu
 // ---------------------------------------------------------------------------
 
 export function mergeRanges(indices: number[], maxGap = 256, entrySize = 4): ByteRange[] {
-  if (indices.length === 0) return [];
+  if (indices.length === 0 || entrySize === 0) return [];
 
   const sorted = indices.slice().sort((a, b) => a - b);
   const ranges: ByteRange[] = [];

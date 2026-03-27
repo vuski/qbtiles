@@ -248,6 +248,19 @@ export function getNodesAtLevel(qbt: QBT, targetLevel: number, viewBbox?: BBox4)
   return result;
 }
 
+export function buildPreviewLayer(nodes: NodeInfo[], previewCellDeg: number) {
+  const radiusMeters = (previewCellDeg * 111_320 / 2) * 0.9;
+  return new ScatterplotLayer<NodeInfo>({
+    id: 'preview-cells',
+    data: nodes,
+    getPosition: (d) => d.position,
+    getFillColor: [100, 150, 255, 80],
+    getRadius: radiusMeters,
+    radiusUnits: 'meters',
+    pickable: false,
+  });
+}
+
 export function buildNodeCountLayer(nodes: NodeInfo[]) {
   return new TextLayer<NodeInfo>({
     id: 'node-counts',
@@ -371,16 +384,16 @@ function valueToColor(value: number, minVal: number, maxVal: number): [number, n
   return [r, g, b, 210];
 }
 
-export function buildScatterLayer(cells: CellPoint[], minVal: number, maxVal: number) {
+export function buildScatterLayer(cells: CellPoint[], minVal: number, maxVal: number, pixelDeg: number) {
+  // 90% of cell size in meters (1° ≈ 111,320m at equator)
+  const radiusMeters = (pixelDeg * 111_320 / 2) * 0.9;
   return new ScatterplotLayer<CellPoint>({
     id: 'scatter-cells',
     data: cells,
     getPosition: (d) => d.position,
     getFillColor: (d) => valueToColor(d.value, minVal, maxVal),
-    getRadius: 2,
-    radiusUnits: 'pixels',
-    radiusMinPixels: 1,
-    radiusMaxPixels: 6,
+    getRadius: radiusMeters,
+    radiusUnits: 'meters',
     pickable: true,
   });
 }
@@ -461,7 +474,7 @@ export function buildScatterLayerNative(cells: CellPoint[], minVal: number, maxV
     coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
     getPosition: (d) => d.position,
     getFillColor: (d) => valueToColor(d.value, minVal, maxVal),
-    getRadius: tileSize / 2,
+    getRadius: tileSize / 2 * 0.9,
     radiusUnits: 'common' as const,
     pickable: true,
   });
@@ -507,6 +520,19 @@ export function getNodesAtLevelNative(qbt: QBT, targetLevel: number): NodeInfo[]
     queue = next;
   }
   return result;
+}
+
+export function buildPreviewLayerNative(nodes: NodeInfo[], previewCellSize: number) {
+  return new ScatterplotLayer<NodeInfo>({
+    id: 'preview-native',
+    data: nodes,
+    coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+    getPosition: (d) => d.position,
+    getFillColor: [100, 150, 255, 80],
+    getRadius: previewCellSize / 2 * 0.9,
+    radiusUnits: 'common' as const,
+    pickable: false,
+  });
 }
 
 export function buildNodeCountLayerNative(nodes: NodeInfo[]) {

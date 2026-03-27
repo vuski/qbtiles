@@ -1175,7 +1175,8 @@ def build(output_path, folder=None, geotiff=None,
           crs=4326, origin_x=-180.0, origin_y=90.0,
           extent_x=360.0, extent_y=180.0,
           entry_size=4, fields=None, ext=".png", metadata=None,
-          nodata=None, compress=True, compress_bitmask=True):
+          nodata=None, bitmask_only=False,
+          compress=True, compress_bitmask=True):
     """QBT 파일 생성 — 인자 조합으로 모드 자동 판단.
 
     GeoTIFF 변환:
@@ -1337,7 +1338,19 @@ def build(output_path, folder=None, geotiff=None,
                 TYPE_INT32 if np.issubdtype(dtype, np.integer) else TYPE_FLOAT32)
             type_size = _TYPE_SIZE[type_code]
 
-            if band_count == 1:
+            if bitmask_only:
+                if band_count > 1:
+                    raise ValueError("bitmask_only=True is not supported for multi-band GeoTIFF")
+                unique_vals = set(arrays[0][rows, cols_arr].tolist())
+                if not unique_vals.issubset({0, 1}):
+                    raise ValueError(
+                        f"bitmask_only=True but data contains values other than 0 and 1: "
+                        f"{sorted(unique_vals - {0, 1})[:5]}"
+                    )
+                values = None
+                fields = []
+                entry_size = 0
+            elif band_count == 1:
                 # Single band → fixed row mode
                 values = arrays[0][rows, cols_arr].tolist()
                 if fields is None:
@@ -1631,7 +1644,7 @@ def build(output_path, folder=None, geotiff=None,
                           metadata=metadata, compress=compress,
                           compress_bitmask=compress_bitmask)
 
-    elif values is not None:
+    elif values is not None and not bitmask_only:
         # Fixed row 모드
         if zoom is None:
             raise ValueError("zoom is required for fixed row mode")
@@ -1669,6 +1682,41 @@ def build(output_path, folder=None, geotiff=None,
                        origin_x=origin_x, origin_y=origin_y,
                        extent_x=extent_x, extent_y=extent_y,
                        entry_size=entry_size, fields=fields,
+                       metadata=metadata, compress_bitmask=compress_bitmask)
+
+    elif bitmask_only:
+        # Bitmask-only 모드: values 섹션 없이 bitmask만 저장
+        if zoom is None:
+            raise ValueError("zoom is required for bitmask_only mode")
+
+        # values가 주어진 경우 0/1 검증
+        if values is not None:
+            check_vals = values
+            if isinstance(values, (bytes, bytearray)):
+                check_vals = list(values)
+            if not set(check_vals).issubset({0, 1}):
+                bad = sorted(set(check_vals) - {0, 1})[:5]
+                raise ValueError(
+                    f"bitmask_only=True but values contain non-binary data: {bad}"
+                )
+
+        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
+        root = build_quadtree(quadkey_info)
+        bitmask_bytes, leaf_count = serialize_bitmask(root)
+
+        # Add data_bounds to metadata
+        if coords is not None:
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            metadata = _ensure_metadata(metadata, {
+                "data_bounds": {"west": min(xs), "south": min(ys), "east": max(xs), "north": max(ys)}
+            })
+
+        write_qbt_fixed(output_path, bitmask_bytes, b'',
+                       zoom=zoom, crs=crs,
+                       origin_x=origin_x, origin_y=origin_y,
+                       extent_x=extent_x, extent_y=extent_y,
+                       entry_size=0, fields=[],
                        metadata=metadata, compress_bitmask=compress_bitmask)
 
     else:

@@ -47,7 +47,7 @@ Offset  Size  Type      Field              Description
 64      8     uint64    values_length      values 섹션의 바이트 길이
 72      8     uint64    metadata_offset    JSON 메타데이터의 바이트 오프셋 (0 = 없음)
 80      8     uint64    metadata_length    JSON 메타데이터의 바이트 길이
-88      4     uint32    entry_size         엔트리당 바이트 수. 0 = variable 모드.
+88      4     uint32    entry_size         엔트리당 바이트 수. 0 = variable 모드 또는 bitmask-only (값 없는 fixed).
 92      2     uint16    field_count        스키마의 필드 수 (fixed 모드)
 94      32    bytes     index_hash         bitmask 섹션의 SHA-256 (header_size ~ values_offset).
                                            미계산 시 전부 0.

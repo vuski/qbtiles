@@ -12,11 +12,13 @@ import {
   buildBboxLayer,
   buildGridLayers,
   buildNodeCountLayer,
+  buildPreviewLayer,
   buildScatterLayer,
   buildScatterLayerNative,
   buildLeafCellsNative,
   getNodesAtLevel,
   getNodesAtLevelNative,
+  buildPreviewLayerNative,
   buildNodeCountLayerNative,
   buildGridLinesNative,
 } from './layers';
@@ -32,6 +34,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 const CELL_VISIBLE_OFFSET = 9; // show cells when mapZoom >= fileZoom - this value
+const PREVIEW_ZOOM_AHEAD = 7;  // preview bitmask at mapZoom + this level
 const EMPTY_STYLE: maplibregl.StyleSpecification = { version: 8, sources: {}, layers: [] };
 
 interface CellPoint {
@@ -105,17 +108,29 @@ function GeoViewer({ qbt, fileName, bbox, loadFile, derivedGrid }: {
 
           if (result.leafIndices.length === 0) { setLeafCells([]); return; }
 
-          const ranges = mergeRanges(result.leafIndices, 256, qbt.header.entrySize);
-          const { values } = await fetchRanges(
-            qbt.url, ranges, ac.signal, undefined, qbt.header.valuesOffset,
-          );
-          if (ac.signal.aborted) return;
+          let points: CellPoint[];
+          if (qbt.header.entrySize === 0) {
+            // Bitmask-only: no values to fetch, all cells have value=1
+            points = result.leafIndices.map((_, i) => ({
+              position: [
+                derivedGrid.originLon + result.cols[i] * derivedGrid.pixelDeg + derivedGrid.pixelDeg / 2,
+                derivedGrid.originLat - result.rows[i] * derivedGrid.pixelDeg - derivedGrid.pixelDeg / 2,
+              ] as [number, number],
+              value: 1,
+            }));
+          } else {
+            const ranges = mergeRanges(result.leafIndices, 256, qbt.header.entrySize);
+            const { values } = await fetchRanges(
+              qbt.url, ranges, ac.signal, undefined, qbt.header.valuesOffset,
+            );
+            if (ac.signal.aborted) return;
 
-          const cells = queryResultToCells(result, values, ranges, derivedGrid);
-          const points: CellPoint[] = cells.map((c: any) => ({
-            position: c.position,
-            value: c.values?.[activeField] ?? c.value ?? 0,
-          }));
+            const cells = queryResultToCells(result, values, ranges, derivedGrid);
+            points = cells.map((c: any) => ({
+              position: c.position,
+              value: c.values?.[activeField] ?? c.value ?? 0,
+            }));
+          }
           if (points.length > 0) {
             let min = Infinity, max = -Infinity;
             for (const p of points) { if (p.value < min) min = p.value; if (p.value > max) max = p.value; }
@@ -203,15 +218,16 @@ function GeoViewer({ qbt, fileName, bbox, loadFile, derivedGrid }: {
       const fileZoom = qbt.header.zoom;
       console.log(`Mode: ${qbt.mode}, mapZoom=${mapZoom.toFixed(1)}, fileZoom=${fileZoom}, leafCells=${leafCells.length}`);
       if (Math.floor(mapZoom) < fileZoom - CELL_VISIBLE_OFFSET) {
-        const displayLevel = Math.min(Math.floor(mapZoom) + 1, fileZoom - 1);
+        const displayLevel = Math.min(Math.floor(mapZoom) + PREVIEW_ZOOM_AHEAD, fileZoom);
         const t0 = performance.now();
         const nodes = getNodesAtLevel(qbt, displayLevel, viewBbox);
         const t1 = performance.now();
+        const previewCellDeg = qbt.header.extentX / (1 << displayLevel);
         console.log(`getNodesAtLevel(${displayLevel}): ${nodes.length} nodes, ${(t1-t0).toFixed(1)}ms`);
-        result.push(buildNodeCountLayer(nodes));
+        result.push(buildPreviewLayer(nodes, previewCellDeg));
       } else if (leafCells.length > 0) {
         const t0 = performance.now();
-        result.push(buildScatterLayer(leafCells, cellStats.min, cellStats.max));
+        result.push(buildScatterLayer(leafCells, cellStats.min, cellStats.max, derivedGrid?.pixelDeg ?? qbt.header.extentX / (1 << qbt.header.zoom)));
         console.log(`buildScatterLayer: ${leafCells.length} cells, ${(performance.now()-t0).toFixed(1)}ms`);
       }
     }

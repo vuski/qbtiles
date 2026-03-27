@@ -382,6 +382,21 @@ export class QBT {
     }
 
     if (this.mode === 'fixed') {
+      // Bitmask-only: no values to fetch, all cells have value=1
+      if (this.header.valuesLength === 0) {
+        const g = this._grid;
+        const cells: QBTCellData[] = result.leafIndices.map((_, i) => ({
+          position: this._toWGS84(
+            g.originLon + result.cols[i] * g.pixelDeg + g.pixelDeg / 2,
+            g.originLat - result.rows[i] * g.pixelDeg - g.pixelDeg / 2,
+          ) as [number, number],
+          value: 1,
+          chunkIndex: 0,
+        }));
+        this._lastStats = { requests: 0, bytes: 0, cells: cells.length, timeMs: performance.now() - t0 };
+        return cells;
+      }
+
       // Range Request
       const ranges = mergeRanges(result.leafIndices, 256, this.header.entrySize);
       const { values, totalBytes, requestCount } = await fetchRanges(

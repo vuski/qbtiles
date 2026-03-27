@@ -90,6 +90,9 @@ qbt.build("global_pop.qbt",
 
 # GeoTIFF → QBTiles conversion (cell_size, CRS, extent auto-detected)
 qbt.build("worldpop.qbt", geotiff="worldpop_2025.tif")
+
+# Bitmask-only — store only cell existence (no values), e.g. land/water mask
+qbt.build("landmask.qbt", geotiff="landmask.tif", nodata=0, bitmask_only=True)
 ```
 
 ### TypeScript — Read & Query
@@ -134,7 +137,7 @@ Full spec: [format-spec.md](docs/format-spec.md)
 
 | Function | Description |
 |----------|-------------|
-| `build(output, ...)` | Unified builder — auto-detects mode from `folder` / `columns` / `values` / `geotiff` |
+| `build(output, ...)` | Unified builder — auto-detects mode from `folder` / `columns` / `values` / `geotiff`. Options: `nodata=`, `bitmask_only=True` |
 | `read_qbt_header(path_or_bytes)` | Parse QBT header to dict |
 | `tile_to_quadkey_int64(z, x, y)` | Tile coords → 64-bit quadkey |
 
@@ -173,6 +176,8 @@ Split-screen comparison: QBTiles cell-level vs COG block-level Range Request on 
 
 ### [File Viewer](https://vuski.github.io/qbtiles/demo/viewer/) — All modes
 Drag & drop any `.qbt` or `.qbt.gz` file to inspect its contents. Supports all three modes with auto-detection.
+
+[![File Viewer](docs/image-viewer.png)](https://vuski.github.io/qbtiles/demo/viewer/)
 
 ## Related Work
 

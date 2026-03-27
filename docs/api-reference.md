@@ -118,8 +118,21 @@ qbt.build("worldpop.qbt",
 | `entry_size` | `int` | `4` | Bytes per cell (e.g. 4 for float32, 8 for float64) |
 | `fields` | `list[dict]` | `None` | `[{"type": TYPE_FLOAT32, "name": "pop"}]` |
 | `geotiff` | `str` | `None` | GeoTIFF path. All other params auto-detected (cell_size, CRS, origin, extent, nodata). Requires `rasterio`, `numpy` |
+| `nodata` | `number` | `None` | Override nodata value (skips cells with this value). If not set, uses the GeoTIFF's built-in nodata |
+| `bitmask_only` | `bool` | `False` | Store only cell existence — no values section. `entry_size=0`. Useful for binary masks (land/water, coverage) |
 
 Grid parameters (`cell_size`/`zoom`, `crs`, `origin_*`, `extent_*`) are the same as columnar mode.
+
+**Bitmask-only**: When `bitmask_only=True`, only the bitmask is stored (no values section). The file is a valid fixed-row QBT with `entry_size=0` and `values_length=0`. On the reader side, `query()` returns all matching cells with `value=1`. This is ideal for binary presence/absence data where the existence itself is the information.
+
+```python
+# Binary mask from GeoTIFF (e.g. land=1, water=0 with nodata=0)
+qbt.build("landmask.qbt", geotiff="landmask.tif", nodata=0, bitmask_only=True)
+
+# From coordinates — just store which cells exist
+qbt.build("coverage.qbt", coords=points, values=[1]*len(points),
+    cell_size=1000, bitmask_only=True)
+```
 
 ```python
 # Custom CRS — origin/extent auto-calculated

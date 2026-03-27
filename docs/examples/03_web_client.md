@@ -14,6 +14,7 @@ const qbt = await openQBT('file.qbt');
 - [Demo 1: Tile Archive Viewer](#1-tile-archive-viewer) — MVT tiles via MapLibre
 - [Demo 2: Columnar Grid](#2-columnar-grid) — 930K population cells from 1.7 MB
 - [Demo 3: Range Request](#3-range-request) — per-cell query on 51M cell dataset
+- [Demo 4: File Viewer](#4-file-viewer) — drag & drop any QBT file
 
 Full source code: [demo-src/src/pages/](https://github.com/vuski/qbtiles/tree/main/demo-src/src/pages)
 
@@ -132,6 +133,28 @@ const cells = await qbt.query([126, 35, 128, 37]);
 // Check transfer stats
 console.log(qbt.lastStats);
 // → { requests: 7, bytes: 23100, cells: 4576, timeMs: 120 }
+```
+
+---
+
+## 4. File Viewer
+
+Drag & drop any `.qbt` or `.qbt.gz` file to visualize its contents. Auto-detects mode, CRS, and fields from the header.
+
+[![File Viewer](../image-viewer.png)](https://vuski.github.io/qbtiles/demo/viewer/)
+<a href="https://vuski.github.io/qbtiles/demo/viewer/" target="_blank">Live demo</a> · [Source](https://github.com/vuski/qbtiles/tree/main/demo-src/src/pages/viewer/App.tsx)
+
+```typescript
+import { openQBT } from 'qbtiles';
+
+// Load from Blob URL (drag & drop file → ArrayBuffer → Blob URL)
+const blob = new Blob([arrayBuffer]);
+const url = URL.createObjectURL(blob);
+const qbt = await openQBT(url);
+
+// Works with all modes — variable, fixed, columnar
+// Variable: qbt.addProtocol(maplibregl) for tile rendering
+// Fixed/Columnar: qbt.query(bbox) for cell visualization
 ```
 
 ---

@@ -50,6 +50,9 @@ qbt.build("global_pop.qbt",
 
 # GeoTIFF → QBTiles conversion (cell_size, CRS, extent auto-detected)
 qbt.build("worldpop.qbt", geotiff="worldpop_2025.tif")
+
+# Bitmask-only — store only cell existence (no values), e.g. land/water mask
+qbt.build("landmask.qbt", geotiff="landmask.tif", nodata=0, bitmask_only=True)
 ```
 
 ### TypeScript — 읽기 및 쿼리

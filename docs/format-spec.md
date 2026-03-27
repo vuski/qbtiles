@@ -47,7 +47,7 @@ Offset  Size  Type      Field              Description
 64      8     uint64    values_length      Byte length of values section
 72      8     uint64    metadata_offset    Byte offset of JSON metadata (0 = none)
 80      8     uint64    metadata_length    Byte length of JSON metadata
-88      4     uint32    entry_size         Bytes per entry. 0 = variable mode.
+88      4     uint32    entry_size         Bytes per entry. 0 = variable mode or bitmask-only (fixed with no values).
 92      2     uint16    field_count        Number of fields in schema (fixed mode)
 94      32    bytes     index_hash         SHA-256 of bitmask section (header_size to values_offset).
                                            All zeros if not computed.
