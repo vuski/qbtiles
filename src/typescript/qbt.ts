@@ -398,7 +398,7 @@ export class QBT {
       }
 
       // Range Request
-      const ranges = mergeRanges(result.leafIndices, 256, this.header.entrySize);
+      const ranges = mergeRanges(result.leafIndices, undefined, this.header.entrySize);
       const { values, totalBytes, requestCount } = await fetchRanges(
         this.url, ranges, signal, onProgress, this.header.valuesOffset,
       );

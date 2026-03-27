@@ -9,7 +9,7 @@ import {
   bboxToRowColRange,
   colToLon,
   rowToLat,
-} from './types';
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -85,7 +85,7 @@ export async function deserializeBitmaskIndex(
     dataStart = bufOffset + 4;
   }
 
-  onProgress?.('Unpacking bitmask...');
+  onProgress?.("Unpacking bitmask...");
   const count = bitmaskByteLen * 2;
   const nibbles = new Uint8Array(count);
   for (let i = 0; i < bitmaskByteLen; i++) {
@@ -118,7 +118,7 @@ export async function deserializeBitmaskIndex(
     }
   }
 
-  onProgress?.('Computing subtree leaf counts...');
+  onProgress?.("Computing subtree leaf counts...");
   await yieldUI();
 
   const subtreeLeaves = new Uint32Array(nibLen);
@@ -140,7 +140,9 @@ export async function deserializeBitmaskIndex(
     }
 
     if (i % CHUNK === 0) {
-      onProgress?.(`Subtree counts... ${((nibLen - i) / nibLen * 100).toFixed(0)}%`);
+      onProgress?.(
+        `Subtree counts... ${(((nibLen - i) / nibLen) * 100).toFixed(0)}%`,
+      );
       await yieldUI();
     }
   }
@@ -171,9 +173,18 @@ function yieldUI(): Promise<void> {
  * @param bbox - Geographic bounding box
  * @param grid - Grid parameters for coordinate conversion
  */
-export function queryBbox(index: BitmaskIndex, bbox: BBox, grid: GridParams): QueryResult {
+export function queryBbox(
+  index: BitmaskIndex,
+  bbox: BBox,
+  grid: GridParams,
+): QueryResult {
   const { colMin, colMax, rowMin, rowMax } = bboxToRowColRange(
-    bbox, grid.originLon, grid.originLat, grid.pixelDeg, grid.rasterCols, grid.rasterRows,
+    bbox,
+    grid.originLon,
+    grid.originLat,
+    grid.pixelDeg,
+    grid.rasterCols,
+    grid.rasterRows,
   );
   const { nibbles, childStart, subtreeLeaves, zoom } = index;
   const leafIndices: number[] = [];
@@ -219,7 +230,12 @@ export function queryBbox(index: BitmaskIndex, bbox: BBox, grid: GridParams): Qu
       const ccMin = childCol * cellSize;
       const ccMax = ccMin + cellSize - 1;
 
-      if (crMax < rowMin || crMin > rowMax || ccMax < colMin || ccMin > colMax) {
+      if (
+        crMax < rowMin ||
+        crMin > rowMax ||
+        ccMax < colMin ||
+        ccMin > colMax
+      ) {
         leafOffset += ci < nibbles.length ? subtreeLeaves[ci] : 1;
         continue;
       }
@@ -251,7 +267,14 @@ export function queryBbox(index: BitmaskIndex, bbox: BBox, grid: GridParams): Qu
 // Range merging + fetch
 // ---------------------------------------------------------------------------
 
-export function mergeRanges(indices: number[], maxGap = 256, entrySize = 4): ByteRange[] {
+/** Max gap (in leaf-index units) to bridge when merging adjacent ranges. */
+const MERGE_MAX_GAP = 5000;
+
+export function mergeRanges(
+  indices: number[],
+  maxGap = MERGE_MAX_GAP,
+  entrySize = 4,
+): ByteRange[] {
   if (indices.length === 0 || entrySize === 0) return [];
 
   const sorted = indices.slice().sort((a, b) => a - b);
@@ -266,13 +289,21 @@ export function mergeRanges(indices: number[], maxGap = 256, entrySize = 4): Byt
       rangeEnd = sorted[i];
       leafIndices.push(sorted[i]);
     } else {
-      ranges.push({ byteStart: rangeStart * entrySize, byteEnd: (rangeEnd + 1) * entrySize - 1, leafIndices });
+      ranges.push({
+        byteStart: rangeStart * entrySize,
+        byteEnd: (rangeEnd + 1) * entrySize - 1,
+        leafIndices,
+      });
       rangeStart = sorted[i];
       rangeEnd = sorted[i];
       leafIndices = [sorted[i]];
     }
   }
-  ranges.push({ byteStart: rangeStart * entrySize, byteEnd: (rangeEnd + 1) * entrySize - 1, leafIndices });
+  ranges.push({
+    byteStart: rangeStart * entrySize,
+    byteEnd: (rangeEnd + 1) * entrySize - 1,
+    leafIndices,
+  });
 
   return ranges;
 }
@@ -302,9 +333,8 @@ export async function fetchRanges(
   let totalBytes = 0;
   let requestCount = 0;
 
-  const uncachedRanges: ByteRange[] = [];
+  const allUncached: number[] = [];
   for (const range of ranges) {
-    const uncachedIndices: number[] = [];
     for (const leafIdx of range.leafIndices) {
       const cached = leafCache.get(leafIdx);
       if (cached !== undefined) {
@@ -312,19 +342,18 @@ export async function fetchRanges(
           values.set(leafIdx, cached);
         }
       } else {
-        uncachedIndices.push(leafIdx);
+        allUncached.push(leafIdx);
       }
     }
-    if (uncachedIndices.length > 0) {
-      const remerged = mergeRanges(uncachedIndices);
-      for (const r of remerged) uncachedRanges.push(r);
-    }
   }
+  const uncachedRanges = mergeRanges(allUncached);
 
   await Promise.all(
     uncachedRanges.map(async (range) => {
       const res = await fetch(url, {
-        headers: { Range: `bytes=${valuesOffset + range.byteStart}-${valuesOffset + range.byteEnd}` },
+        headers: {
+          Range: `bytes=${valuesOffset + range.byteStart}-${valuesOffset + range.byteEnd}`,
+        },
         signal,
       });
       requestCount++;
@@ -333,11 +362,15 @@ export async function fetchRanges(
       const f32 = new Float32Array(buf);
 
       const baseLeafIdx = range.byteStart / 4;
+      // Cache all fetched cells (including gap fills)
+      for (let j = 0; j < f32.length; j++) {
+        leafCache.set(baseLeafIdx + j, f32[j]);
+      }
+      // Extract only requested cells into values
       for (const leafIdx of range.leafIndices) {
         const offset = leafIdx - baseLeafIdx;
         if (offset >= 0 && offset < f32.length) {
           const v = f32[offset];
-          leafCache.set(leafIdx, v);
           if (!isNaN(v) && v > 0) {
             values.set(leafIdx, v);
           }
@@ -346,12 +379,23 @@ export async function fetchRanges(
     }),
   );
 
-  const estimatedBytes = ranges.reduce((sum, r) => sum + (r.byteEnd - r.byteStart + 1), 0);
+  const estimatedBytes = ranges.reduce(
+    (sum, r) => sum + (r.byteEnd - r.byteStart + 1),
+    0,
+  );
   const estimatedRequests = ranges.length;
-  const cachedCells = ranges.reduce((sum, r) => sum + r.leafIndices.length, 0) -
+  const cachedCells =
+    ranges.reduce((sum, r) => sum + r.leafIndices.length, 0) -
     uncachedRanges.reduce((sum, r) => sum + r.leafIndices.length, 0);
 
-  return { values, totalBytes, requestCount, estimatedBytes, estimatedRequests, cachedCells };
+  return {
+    values,
+    totalBytes,
+    requestCount,
+    estimatedBytes,
+    estimatedRequests,
+    cachedCells,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -398,30 +442,34 @@ export function queryResultToChunks(
     idxMap.set(result.leafIndices[i], i);
   }
 
-  return ranges.map((range) => {
-    let minRow = Infinity, maxRow = -Infinity;
-    let minCol = Infinity, maxCol = -Infinity;
+  return ranges
+    .map((range) => {
+      let minRow = Infinity,
+        maxRow = -Infinity;
+      let minCol = Infinity,
+        maxCol = -Infinity;
 
-    for (const li of range.leafIndices) {
-      const ri = idxMap.get(li);
-      if (ri === undefined) continue;
-      const r = result.rows[ri];
-      const c = result.cols[ri];
-      if (r < minRow) minRow = r;
-      if (r > maxRow) maxRow = r;
-      if (c < minCol) minCol = c;
-      if (c > maxCol) maxCol = c;
-    }
-    if (minRow === Infinity) return null;
+      for (const li of range.leafIndices) {
+        const ri = idxMap.get(li);
+        if (ri === undefined) continue;
+        const r = result.rows[ri];
+        const c = result.cols[ri];
+        if (r < minRow) minRow = r;
+        if (r > maxRow) maxRow = r;
+        if (c < minCol) minCol = c;
+        if (c > maxCol) maxCol = c;
+      }
+      if (minRow === Infinity) return null;
 
-    const half = grid.pixelDeg / 2;
-    return {
-      bbox: [
-        colToLon(minCol, grid.originLon, grid.pixelDeg) - half,
-        rowToLat(maxRow, grid.originLat, grid.pixelDeg) - half,
-        colToLon(maxCol, grid.originLon, grid.pixelDeg) + half,
-        rowToLat(minRow, grid.originLat, grid.pixelDeg) + half,
-      ] as BBox,
-    };
-  }).filter(Boolean) as QBTChunk[];
+      const half = grid.pixelDeg / 2;
+      return {
+        bbox: [
+          colToLon(minCol, grid.originLon, grid.pixelDeg) - half,
+          rowToLat(maxRow, grid.originLat, grid.pixelDeg) - half,
+          colToLon(maxCol, grid.originLon, grid.pixelDeg) + half,
+          rowToLat(minRow, grid.originLat, grid.pixelDeg) + half,
+        ] as BBox,
+      };
+    })
+    .filter(Boolean) as QBTChunk[];
 }

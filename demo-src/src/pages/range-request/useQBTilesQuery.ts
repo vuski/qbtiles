@@ -146,7 +146,7 @@ export function useQBTilesQuery(qbtUrl: string) {
           return { bytes: 0 };
         }
 
-        const ranges = mergeRanges(result.leafIndices, 256, header.entrySize);
+        const ranges = mergeRanges(result.leafIndices, undefined, header.entrySize);
 
         const { values, totalBytes, requestCount, estimatedBytes, estimatedRequests, cachedCells } =
           await fetchRanges(qbtUrl, ranges, ac.signal, onProgress, header.valuesOffset);
