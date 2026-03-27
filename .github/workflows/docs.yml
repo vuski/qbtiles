@@ -38,9 +38,6 @@ jobs:
           cd demo-src
           npm ci
           npm run build
-          cp ../examples/korea_tiles.idx.gz ../docs/demo/tiles/
-          cp ../examples/korea_tiles.data ../docs/demo/tiles/
-          cp ../examples/korea_pop_100m.qbt.gz ../docs/demo/population/
 
       - run: pip install mkdocs-material "mkdocs-jupyter==0.25.1"
 
