@@ -5,7 +5,9 @@ import { MapShell } from '../../components/MapShell';
 import { InfoPanel } from '../../components/InfoPanel';
 import { openQBT, type QBT } from 'qbtiles';
 
-const QBT_URL = './korea_tiles.qbt';
+const QBT_URL = import.meta.env.DEV
+  ? '/examples/korea_tiles.qbt'
+  : './korea_tiles.qbt';
 
 interface Stats {
   fileSize: number;

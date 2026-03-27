@@ -5,7 +5,9 @@ import { InfoPanel } from '../../components/InfoPanel';
 import { ColumnLayer } from '@deck.gl/layers';
 import { openQBT, type QBT } from 'qbtiles';
 
-const DATA_URL = './korea_pop_100m.qbt.gz';
+const DATA_URL = import.meta.env.DEV
+  ? '/examples/korea_pop_100m.qbt.gz'
+  : './korea_pop_100m.qbt.gz';
 
 type Mode = 'total' | 'male' | 'female';
 
