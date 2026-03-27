@@ -89,7 +89,8 @@ QBT 파일 생성 및 직렬화:
 - `QBT.getTile(z, x, y)` — 타일 데이터 가져오기 (variable 모드)
 - `QBT.query(bbox)` — 공간 쿼리 (전체 모드)
 - `QBT.columns` — 컬럼 값 (columnar 모드)
-- `QBT.addProtocol(maplibregl)` — MapLibre 커스텀 프로토콜 (variable 모드)
+- `QBT.addProtocol(maplibregl)` — MapLibre 커스텀 프로토콜, gzip 자동 해제 (variable 모드)
+- `QBT.metadata` — 파일 메타데이터 (`data_bounds`, `vector_layers` 등)
 - `QBT.toWGS84(x, y)` / `QBT.fromWGS84(lng, lat)` — proj4를 통한 CRS 변환
 - `registerCRS(epsg, proj4Def)` — 커스텀 CRS 정의 등록
 - 저수준: `parseQBTHeader()`, `queryBbox()`, `mergeRanges()`, `fetchRanges()`, `readColumnarValues()`

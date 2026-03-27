@@ -32,7 +32,7 @@ qbt.build("korea.qbt", folder="tiles/")
 | `folder` | `str` | *required* | Tile folder. Must contain `{z}/{x}/{y}.{ext}` structure (e.g. `5/17/11.png`) |
 | `ext` | `str` | `".png"` | File extension to match. `.png`, `.pbf`, `.mvt`, `.webp` etc. |
 
-All zoom levels found in the folder are included. Tiles are concatenated in quadkey order.
+All zoom levels found in the folder are included. Tiles are concatenated in quadkey order. For MVT/PBF tiles, `vector_layers` and `data_bounds` are automatically recorded in metadata.
 
 ```python
 # MVT vector tiles
@@ -220,6 +220,7 @@ const cells = await world.query([126, 35, 128, 37]);
 | `mode` | `'variable'\|'fixed'\|'columnar'` | Detected from flags: `0x0`→variable, `0x1`→fixed, `0x3`→columnar |
 | `leafCount` | `number` | Tile count (variable) or cell count (fixed/columnar) |
 | `columns` | `Map<string, number[]>\|null` | Column values. Only available in columnar mode |
+| `metadata` | `Record<string, any>\|null` | Parsed JSON from metadata section. May contain `data_bounds`, `vector_layers` |
 | `lastStats` | `QBTQueryStats\|null` | `{ requests, bytes, cells, timeMs }` from last `query()` |
 
 ### `QBT` — Methods
@@ -281,7 +282,7 @@ qbt.addProtocol(maplibregl, protocol?)
 | `maplibregl` | `any` | *required* | MapLibre GL JS module |
 | `protocol` | `string` | `'qbtiles'` | Custom protocol name |
 
-Registers a custom protocol handler. **Variable mode only.** After calling, use `protocol:///{z}/{x}/{y}` in tile sources.
+Registers a custom protocol handler. **Variable mode only.** Gzip-compressed tiles are automatically decompressed. After calling, use `protocol:///{z}/{x}/{y}` in tile sources.
 
 ```typescript
 qbt.addProtocol(maplibregl, 'qbt');

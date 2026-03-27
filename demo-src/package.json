@@ -21,6 +21,7 @@
     "react-map-gl": "^8"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "@types/proj4": "^2",
     "@types/react": "^19",
     "@types/react-dom": "^19",

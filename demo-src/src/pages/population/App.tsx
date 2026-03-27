@@ -39,6 +39,12 @@ function App() {
       const t0 = performance.now();
 
       const qbt = await openQBT(DATA_URL, (msg) => setLoadStatus(msg));
+      // Fetch actual file size (gzip compressed)
+      try {
+        const res = await fetch(DATA_URL, { method: 'HEAD' });
+        const cl = res.headers.get('content-length');
+        if (cl) setFileSize(Number(cl));
+      } catch { /* ok */ }
 
       // Get columns
       const totals = qbt.columns!.get('total')!;
@@ -183,6 +189,7 @@ function App() {
           <p style={{ margin: '8px 0 0' }}>{loadStatus}</p>
         ) : (
           <div style={{ margin: '8px 0 0', fontSize: 13 }}>
+            <div>File: {fmt(fileSize)}</div>
             <div>Cells: {cells.length.toLocaleString()}</div>
             <div>Per cell: {cells.length > 0 ? (fileSize / cells.length).toFixed(2) : '-'} Byte (coords + 3 values)</div>
             <div>Load: {(loadTime / 1000).toFixed(1)}s</div>

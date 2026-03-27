@@ -1,6 +1,6 @@
 # Example: Web Client
 
-All three demos use a single entry point: `openQBT(url)`. It reads the header, detects the mode, and loads data automatically.
+All demos use a single entry point: `openQBT(url)`. It reads the header, detects the mode, and loads data automatically.
 
 ```bash
 npm install qbtiles

@@ -89,7 +89,8 @@ Browser-side QBT reading and spatial query:
 - `QBT.getTile(z, x, y)` — fetch tile data (variable mode)
 - `QBT.query(bbox)` — spatial query (all modes)
 - `QBT.columns` — column values (columnar mode)
-- `QBT.addProtocol(maplibregl)` — MapLibre custom protocol (variable mode)
+- `QBT.addProtocol(maplibregl)` — MapLibre custom protocol, auto gzip decompression (variable mode)
+- `QBT.metadata` — File metadata (`data_bounds`, `vector_layers`, etc.)
 - `QBT.toWGS84(x, y)` / `QBT.fromWGS84(lng, lat)` — CRS conversion via proj4
 - `registerCRS(epsg, proj4Def)` — register custom CRS definitions
 - Low-level: `parseQBTHeader()`, `queryBbox()`, `mergeRanges()`, `fetchRanges()`, `readColumnarValues()`

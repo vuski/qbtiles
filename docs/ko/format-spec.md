@@ -272,6 +272,17 @@ Range: bytes={values_offset + offset}-{values_offset + offset + length - 1}
 
 `metadata_offset = 0`이면 메타데이터가 없다.
 
+### 예약 필드
+
+다음 metadata 필드는 정의된 의미를 가진다. 파서는 존재할 경우 이를 인식해야 한다:
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `data_bounds` | `{west, south, east, north}` | 실제 데이터 범위 (WGS84 또는 네이티브 CRS). 헤더의 `origin/extent`는 quadtree 격자를 정의하며 데이터보다 클 수 있다. `data_bounds`는 데이터가 존재하는 셀의 타이트한 경계 상자를 제공한다. |
+| `vector_layers` | `[{id, minzoom?, maxzoom?}, ...]` | MVT source-layer 이름 (variable-entry 모드, TileJSON 호환). 클라이언트가 타일을 파싱하지 않고 MapLibre 레이어를 등록할 수 있게 한다. |
+
+`build()`는 모든 모드에서 `data_bounds`를, MVT/PBF 타일 아카이브에서는 `vector_layers`를 자동 기록한다.
+
 ## 7. 좌표계
 
 ### 표준 CRS (crs > 0)

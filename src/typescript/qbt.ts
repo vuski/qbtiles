@@ -219,6 +219,9 @@ export class QBT {
   // Stats
   private _lastStats: QBTQueryStats | null = null;
 
+  // Metadata
+  private _metadata: Record<string, any> | null = null;
+
   constructor(url: string, header: QBTHeader) {
     this.url = url;
     this.header = header;
@@ -252,6 +255,11 @@ export class QBT {
   /** Last query statistics */
   get lastStats(): QBTQueryStats | null {
     return this._lastStats;
+  }
+
+  /** File metadata (JSON parsed from metadata section, if present) */
+  get metadata(): Record<string, any> | null {
+    return this._metadata;
   }
 
   // ---- Variable-entry methods ----
@@ -288,7 +296,7 @@ export class QBT {
     return this._variableIndex.get(tileToQuadkey(z, x, y));
   }
 
-  /** Register as MapLibre custom protocol */
+  /** Register as MapLibre custom protocol. Automatically decompresses gzip tiles. */
   addProtocol(maplibregl: any, protocol: string = 'qbtiles'): void {
     if (this.mode !== 'variable') throw new Error(`addProtocol is only for variable mode`);
     if (!this._variableIndex) throw new Error('Not loaded');
@@ -299,7 +307,17 @@ export class QBT {
         const parts = params.url.replace(`${protocol}://`, '').split('/').filter(Boolean);
         const [z, x, y] = parts.map(Number);
         const data = await self.getTile(z, x, y, abortController.signal);
-        return { data: data ?? new ArrayBuffer(0) };
+        if (!data) return { data: new ArrayBuffer(0) };
+        // Decompress gzip if needed (MVT tiles are often gzip-compressed)
+        const bytes = new Uint8Array(data);
+        if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+          const ds = new DecompressionStream('gzip');
+          const w = ds.writable.getWriter();
+          w.write(bytes);
+          w.close();
+          return { data: await new Response(ds.readable).arrayBuffer() };
+        }
+        return { data };
       },
     );
   }
@@ -504,6 +522,11 @@ export class QBT {
     this._columns = columns;
     this._buffer = buffer;
   }
+
+  /** @internal */
+  _setMetadata(meta: Record<string, any>): void {
+    this._metadata = meta;
+  }
 }
 
 // ===========================================================================
@@ -571,6 +594,24 @@ export async function openQBT(
   } else {
     // Fixed row
     await _initFixed(qbt, url, header, onProgress, signal);
+  }
+
+  // 4. Parse metadata if present
+  if (header.metadataOffset > 0 && header.metadataLength > 0) {
+    try {
+      let metaBuf: ArrayBuffer;
+      if (fullBuffer) {
+        metaBuf = fullBuffer.slice(header.metadataOffset, header.metadataOffset + header.metadataLength);
+      } else {
+        const res = await fetch(url, {
+          headers: { Range: `bytes=${header.metadataOffset}-${header.metadataOffset + header.metadataLength - 1}` },
+          signal,
+        });
+        metaBuf = await res.arrayBuffer();
+      }
+      const metaText = new TextDecoder().decode(metaBuf);
+      qbt._setMetadata(JSON.parse(metaText));
+    } catch { /* metadata parse failure is non-fatal */ }
   }
 
   return qbt;

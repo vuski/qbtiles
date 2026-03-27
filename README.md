@@ -171,6 +171,9 @@ Split-screen comparison: QBTiles cell-level vs COG block-level Range Request on 
 
 [![Range Request Comparison](docs/image-range-request.png)](https://vuski.github.io/qbtiles/demo/range-request/)
 
+### [File Viewer](https://vuski.github.io/qbtiles/demo/viewer/) — All modes
+Drag & drop any `.qbt` or `.qbt.gz` file to inspect its contents. Supports all three modes with auto-detection.
+
 ## Related Work
 
 - **Sparse Voxel Octree (SVO)** — Same bitmask principle in 3D (8-bit masks for octree)

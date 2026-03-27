@@ -96,7 +96,7 @@ src/
   typescript/bitmask-index.ts — Lazy tree index, spatial query, Range Request
   typescript/types.ts        — Shared types (BBox, GridParams, coord utils)
   cpp/                       — Native Hilbert→quadkey encoder (pybind11, optional)
-demo-src/                    — Vite + React demo source (3 pages + landing)
+demo-src/                    — Vite + React demo source (4 pages + landing)
 docs/                        — MkDocs documentation site source
 examples/                    — Sample data files (.qbt, .qbt.gz, .pmtiles)
 dist/                        — npm build output (ESM + CJS + .d.ts)

@@ -16,7 +16,7 @@
 - Sparse tile distributions → larger deltas → more bytes
 - Empty tiles are "skipped" by encoding the gap as a number
 
-### QBTiles File Structure (v0.5.0)
+### QBTiles File Structure
 
 ```
 [128B+ header: magic, version, flags, zoom, CRS, origin, extent,

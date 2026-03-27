@@ -153,8 +153,8 @@ __pycache__/
 
 # Demo
 demo-src/node_modules/
-demo-src/tiles/
 demo-src/src/pages/population/*.qbt.gz
+demo-src/tiles/*.qbt
 demo-src/tiles/*.data
 demo-src/tiles/*.gz
 demo-src/population/*.gz
@@ -166,3 +166,4 @@ _test.tif
 docs/SESSION_SUMMARY.md
 docs/examples/pop_korea_100m.qbt.gz
 docs/examples/sample.qbt
+**/tiles_extracted/

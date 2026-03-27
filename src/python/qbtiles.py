@@ -486,6 +486,117 @@ class Entry:
         self.run_length = run_length
 
 
+def _tile2lat(y, n):
+    """Convert tile Y index to latitude (Web Mercator)."""
+    import math
+    lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
+    return math.degrees(lat_rad)
+
+
+def _extract_mvt_layer_names(folder, ext=".mvt"):
+    """Extract MVT vector layer names by sampling tiles at different zoom levels.
+
+    Scans the folder for tile files, samples one per zoom level,
+    and parses MVT protobuf to extract layer names.
+    """
+    import gzip as _gzip
+    layer_names = []
+    sampled_zooms = set()
+
+    for root_dir, dirs, files in os.walk(folder):
+        for f in sorted(files):
+            if not f.endswith(ext):
+                continue
+            # Parse z from path
+            parts = os.path.relpath(os.path.join(root_dir, f), folder).replace("\\", "/").split("/")
+            if len(parts) < 3:
+                continue
+            try:
+                z = int(parts[0])
+            except ValueError:
+                continue
+            if z in sampled_zooms:
+                continue
+            sampled_zooms.add(z)
+
+            # Read and decompress tile
+            filepath = os.path.join(root_dir, f)
+            with open(filepath, "rb") as fh:
+                data = fh.read()
+            if data[:2] == b'\x1f\x8b':
+                data = _gzip.decompress(data)
+
+            # Parse MVT protobuf: top-level field 3 = Layer, Layer field 1 = name
+            pos = 0
+            while pos < len(data):
+                # Read varint tag
+                tag = 0
+                shift = 0
+                while pos < len(data):
+                    b = data[pos]; pos += 1
+                    tag |= (b & 0x7f) << shift; shift += 7
+                    if not (b & 0x80):
+                        break
+                field_num = tag >> 3
+                wire_type = tag & 0x7
+
+                if wire_type == 2:  # length-delimited
+                    length = 0; shift = 0
+                    while pos < len(data):
+                        b = data[pos]; pos += 1
+                        length |= (b & 0x7f) << shift; shift += 7
+                        if not (b & 0x80):
+                            break
+                    if field_num == 3 and length > 0:
+                        # Layer message — parse field 1 (name)
+                        layer_end = pos + length
+                        inner_pos = pos
+                        while inner_pos < layer_end:
+                            it = 0; shift = 0
+                            while inner_pos < layer_end:
+                                b = data[inner_pos]; inner_pos += 1
+                                it |= (b & 0x7f) << shift; shift += 7
+                                if not (b & 0x80):
+                                    break
+                            if (it >> 3) == 1 and (it & 0x7) == 2:
+                                nl = 0; shift = 0
+                                while inner_pos < layer_end:
+                                    b = data[inner_pos]; inner_pos += 1
+                                    nl |= (b & 0x7f) << shift; shift += 7
+                                    if not (b & 0x80):
+                                        break
+                                name = data[inner_pos:inner_pos + nl].decode('utf-8', errors='ignore')
+                                if name and name not in layer_names:
+                                    layer_names.append(name)
+                                break
+                            elif (it & 0x7) == 0:
+                                while inner_pos < layer_end and data[inner_pos] & 0x80:
+                                    inner_pos += 1
+                                if inner_pos < layer_end:
+                                    inner_pos += 1
+                            else:
+                                break
+                        pos = layer_end
+                    else:
+                        pos += length
+                elif wire_type == 0:
+                    while pos < len(data) and data[pos] & 0x80:
+                        pos += 1
+                    if pos < len(data):
+                        pos += 1
+                elif wire_type == 5:
+                    pos += 4
+                elif wire_type == 1:
+                    pos += 8
+                else:
+                    break
+
+            if len(sampled_zooms) >= 20:
+                break
+
+    return layer_names
+
+
 def index_tile_folder(folder, ext=".png"):
     """Scan a z/x/y tile folder and build a QBTiles index.
 
@@ -1064,7 +1175,7 @@ def build(output_path, folder=None, geotiff=None,
           crs=4326, origin_x=-180.0, origin_y=90.0,
           extent_x=360.0, extent_y=180.0,
           entry_size=4, fields=None, ext=".png", metadata=None,
-          compress=True, compress_bitmask=True):
+          nodata=None, compress=True, compress_bitmask=True):
     """QBT 파일 생성 — 인자 조합으로 모드 자동 판단.
 
     GeoTIFF 변환:
@@ -1110,19 +1221,22 @@ def build(output_path, folder=None, geotiff=None,
                 "Install with: pip install rasterio numpy"
             )
         with rasterio.open(geotiff) as src:
-            nodata = src.nodata
+            file_nodata = src.nodata
             transform = src.transform
-            geotiff_crs = src.crs.to_epsg() if src.crs else None
+            if src.crs is None:
+                raise ValueError(
+                    f"GeoTIFF has no CRS (coordinate reference system). "
+                    f"Please provide a georeferenced file or specify crs= manually."
+                )
+            geotiff_crs = src.crs.to_epsg()
             if geotiff_crs is None:
                 # WKT but no EPSG — try to detect WGS84
-                if src.crs and 'WGS 84' in src.crs.to_wkt():
+                if 'WGS 84' in src.crs.to_wkt():
                     geotiff_crs = 4326
                 else:
-                    geotiff_crs = 4326
-                    import warnings
-                    warnings.warn(
-                        f"Could not determine EPSG code from CRS, defaulting to 4326",
-                        stacklevel=2,
+                    raise ValueError(
+                        f"Could not determine EPSG code from CRS: {src.crs.to_wkt()[:100]}. "
+                        f"Please specify crs= manually."
                     )
 
             # Read all bands
@@ -1133,8 +1247,10 @@ def build(output_path, folder=None, geotiff=None,
                 arrays.append(src.read(b))
 
             # Find valid (non-nodata) cells
-            if nodata is not None:
-                mask = arrays[0] != nodata
+            # User-specified nodata overrides file's nodata
+            effective_nodata = nodata if nodata is not None else file_nodata
+            if effective_nodata is not None:
+                mask = arrays[0] != effective_nodata
             else:
                 mask = np.ones(arrays[0].shape, dtype=bool)
 
@@ -1168,46 +1284,85 @@ def build(output_path, folder=None, geotiff=None,
             bounds = src.bounds  # left, bottom, right, top
             data_w = bounds.right - bounds.left
             data_h = bounds.top - bounds.bottom
-            data_range = max(data_w, data_h)
-
-            # extent = cell_size × 2^zoom (smallest power of 2 that covers data)
             import math
-            zoom_needed = math.ceil(math.log2(data_range / cell_size))
-            auto_extent = cell_size * (2 ** zoom_needed)
 
-            # Origin = align to cell boundaries, covering all data
-            origin_x = math.floor(bounds.left / cell_size) * cell_size
-            origin_y = math.floor(bounds.bottom / cell_size) * cell_size
+            if crs == 4326:
+                # WGS84: origin = NW corner (top-left), Y decreases downward
+                origin_x = math.floor(bounds.left / cell_size) * cell_size
+                origin_y = math.ceil(bounds.top / cell_size) * cell_size
 
-            # Ensure extent covers all data from origin
-            while origin_x + auto_extent < bounds.right:
-                zoom_needed += 1
+                # X/Y extents independently (non-square allowed)
+                zoom_x = math.ceil(math.log2((bounds.right - origin_x) / cell_size))
+                zoom_y = math.ceil(math.log2((origin_y - bounds.bottom) / cell_size))
+                extent_x = cell_size * (2 ** zoom_x)
+                extent_y = cell_size * (2 ** zoom_y)
+
+                # Ensure extent covers all data
+                while origin_x + extent_x < bounds.right:
+                    zoom_x += 1
+                    extent_x = cell_size * (2 ** zoom_x)
+                while origin_y - extent_y > bounds.bottom:
+                    zoom_y += 1
+                    extent_y = cell_size * (2 ** zoom_y)
+            else:
+                # Custom CRS: origin = SW corner (bottom-left), Y increases upward
+                origin_x = math.floor(bounds.left / cell_size) * cell_size
+                origin_y = math.floor(bounds.bottom / cell_size) * cell_size
+                data_range = max(data_w, data_h)
+
+                zoom_needed = math.ceil(math.log2(data_range / cell_size))
                 auto_extent = cell_size * (2 ** zoom_needed)
-            while origin_y + auto_extent < bounds.top:
-                zoom_needed += 1
-                auto_extent = cell_size * (2 ** zoom_needed)
+                while origin_x + auto_extent < bounds.right:
+                    zoom_needed += 1
+                    auto_extent = cell_size * (2 ** zoom_needed)
+                while origin_y + auto_extent < bounds.top:
+                    zoom_needed += 1
+                    auto_extent = cell_size * (2 ** zoom_needed)
+                extent_x = auto_extent
+                extent_y = auto_extent
 
-            extent_x = auto_extent
-            extent_y = auto_extent
+            _NUMPY_TO_QBT = {
+                np.dtype('uint8'): TYPE_UINT8,
+                np.dtype('int16'): TYPE_INT16,
+                np.dtype('uint16'): TYPE_UINT16,
+                np.dtype('int32'): TYPE_INT32,
+                np.dtype('uint32'): TYPE_UINT32,
+                np.dtype('float32'): TYPE_FLOAT32,
+                np.dtype('float64'): TYPE_FLOAT64,
+                np.dtype('int64'): TYPE_INT64,
+                np.dtype('uint64'): TYPE_UINT64,
+            }
+            dtype = arrays[0].dtype
+            type_code = _NUMPY_TO_QBT.get(dtype,
+                TYPE_INT32 if np.issubdtype(dtype, np.integer) else TYPE_FLOAT32)
+            type_size = _TYPE_SIZE[type_code]
 
             if band_count == 1:
                 # Single band → fixed row mode
                 values = arrays[0][rows, cols_arr].tolist()
-                is_int = np.issubdtype(arrays[0].dtype, np.integer)
                 if fields is None:
                     name = (band_names[0] if band_names and band_names[0] else 'value')
-                    type_code = TYPE_INT32 if is_int else TYPE_FLOAT32
                     fields = [{'type': type_code, 'name': name}]
-                    entry_size = _TYPE_SIZE[type_code]
+                    entry_size = type_size
             else:
-                # Multiple bands → columnar mode
-                columns = {}
-                for b in range(band_count):
-                    name = (band_names[b] if band_names and band_names[b] else f'band{b+1}')
-                    columns[name] = arrays[b][rows, cols_arr].tolist()
-                # Convert int arrays to int for varint detection
-                if np.issubdtype(arrays[0].dtype, np.integer):
-                    columns = {k: [int(v) for v in vals] for k, vals in columns.items()}
+                # Multiple bands → fixed row mode (interleaved)
+                # Each entry = [band1, band2, ...] concatenated
+                if fields is None:
+                    field_list = []
+                    for b in range(band_count):
+                        name = (band_names[b] if band_names and band_names[b] else f'band{b+1}')
+                        field_list.append({'type': type_code, 'offset': b * type_size, 'name': name})
+                    fields = field_list
+                    entry_size = type_size * band_count
+
+                # Interleave band values into flat values list
+                band_vals = [arrays[b][rows, cols_arr] for b in range(band_count)]
+                values_bytes_io = BytesIO()
+                fmt = '<' + _TYPE_STRUCT[type_code]
+                for i in range(n_valid):
+                    for b in range(band_count):
+                        values_bytes_io.write(struct.pack(fmt, band_vals[b][i]))
+                values = values_bytes_io.getvalue()  # raw bytes, not list
 
     # Auto-calculate origin/extent from coords + cell_size (custom CRS only)
     if coords is not None and cell_size is not None and crs != 4326:
@@ -1241,7 +1396,7 @@ def build(output_path, folder=None, geotiff=None,
 
     # cell_size → zoom 자동 계산
     if cell_size is not None and zoom is None:
-        zoom = round(math.log2(extent_x / cell_size))
+        zoom = round(math.log2(max(extent_x, extent_y) / cell_size))
         if abs(extent_x / (2 ** zoom) - cell_size) > cell_size * 0.01:
             raise ValueError(
                 f"cell_size={cell_size} does not divide extent_x={extent_x} into a power of 2. "
@@ -1250,13 +1405,55 @@ def build(output_path, folder=None, geotiff=None,
     elif cell_size is not None and zoom is not None:
         raise ValueError("Provide either zoom or cell_size, not both")
 
+    import json as _json
+
+    def _ensure_metadata(metadata, extra):
+        """Merge extra fields into metadata JSON string."""
+        if metadata is None:
+            meta = {}
+        elif isinstance(metadata, str):
+            meta = _json.loads(metadata)
+        else:
+            meta = dict(metadata)
+        meta.update(extra)
+        return _json.dumps(meta)
+
     if folder is not None:
         # Variable-entry: 타일 아카이브
         tile_entries = index_tile_folder(folder, ext)
         if not tile_entries:
             raise ValueError(f"No tiles found in {folder}")
         root = build_quadtree(tile_entries)
-        max_zoom = max(e[0].bit_length() // 2 for e in tile_entries) if zoom is None else zoom
+        # quadkey_int64 = 0b11 prefix + 2 bits per zoom level
+        # bit_length = 2 + 2*zoom → zoom = (bit_length - 2) / 2 = bit_length/2 - 1
+        max_zoom = max((e[0].bit_length() // 2) - 1 for e in tile_entries) if zoom is None else zoom
+
+        # Auto-detect MVT vector layer names
+        meta_extra = {}
+        if ext in ('.mvt', '.pbf'):
+            vector_layers = _extract_mvt_layer_names(folder, ext)
+            if vector_layers:
+                meta_extra["vector_layers"] = [{"id": name} for name in vector_layers]
+
+        # data_bounds from leaf tiles (deepest zoom)
+        leaf_entries = [e for e in tile_entries if (e[0].bit_length() // 2) - 1 == max_zoom]
+        if leaf_entries:
+            zxys = [quadkey_int64_to_zxy(e[0]) for e in leaf_entries]
+            min_x = min(x for _, x, _ in zxys)
+            max_x = max(x for _, x, _ in zxys)
+            min_y = min(y for _, _, y in zxys)
+            max_y = max(y for _, _, y in zxys)
+            n = 1 << max_zoom
+            meta_extra["data_bounds"] = {
+                "west": (min_x / n) * 360 - 180,
+                "east": ((max_x + 1) / n) * 360 - 180,
+                "north": _tile2lat(min_y, n),
+                "south": _tile2lat(max_y + 1, n),
+            }
+
+        if meta_extra:
+            metadata = _ensure_metadata(metadata, meta_extra)
+
         write_qbt_variable(output_path, root, tile_entries=tile_entries,
                           zoom=max_zoom, crs=crs,
                           origin_x=origin_x, origin_y=origin_y,
@@ -1268,17 +1465,44 @@ def build(output_path, folder=None, geotiff=None,
     if coords is not None and quadkeys is None:
         if zoom is None:
             raise ValueError("zoom is required when using coords")
-        extent = extent_x  # square grid assumed for custom CRS
-        actual_cell = extent / (2 ** zoom)
         import warnings
-        warnings.warn(
-            f"Coordinates will be snapped to {actual_cell}×{actual_cell} grid cells "
-            f"(zoom={zoom}, extent={extent}). "
-            f"Each coordinate maps to the cell center.",
-            stacklevel=2,
-        )
-        quadkeys = [encode_custom_quadkey(x, y, zoom, origin_x, origin_y, extent)
-                    for x, y in coords]
+
+        if crs == 4326 or crs == 3857:
+            # WGS84: origin is NW corner, Y goes down (matches reader's latToRow)
+            # row = (originY - lat) / pixelDeg, col = (lon - originX) / pixelDeg
+            pixel_deg = extent_x / (2 ** zoom)
+            actual_cell = pixel_deg
+            warnings.warn(
+                f"Coordinates will be snapped to {actual_cell}×{actual_cell} grid cells "
+                f"(zoom={zoom}, extent_x={extent_x}). "
+                f"Each coordinate maps to the cell center.",
+                stacklevel=2,
+            )
+
+            def _wgs84_to_quadkey(lon, lat):
+                col = int((lon - origin_x) / pixel_deg)
+                row = int((origin_y - lat) / pixel_deg)
+                # row/col → quadkey with 0b11 prefix
+                qk = 3
+                for i in reversed(range(zoom)):
+                    rb = (row >> i) & 1
+                    cb = (col >> i) & 1
+                    qk = (qk << 2) | (rb << 1) | cb
+                return qk
+
+            quadkeys = [_wgs84_to_quadkey(x, y) for x, y in coords]
+        else:
+            # Custom CRS: origin is SW corner, Y goes up
+            extent = extent_x  # square grid assumed
+            actual_cell = extent / (2 ** zoom)
+            warnings.warn(
+                f"Coordinates will be snapped to {actual_cell}×{actual_cell} grid cells "
+                f"(zoom={zoom}, extent={extent}). "
+                f"Each coordinate maps to the cell center.",
+                stacklevel=2,
+            )
+            quadkeys = [encode_custom_quadkey(x, y, zoom, origin_x, origin_y, extent)
+                        for x, y in coords]
 
     if quadkeys is None:
         raise ValueError("One of folder, coords, or quadkeys is required")
@@ -1391,6 +1615,14 @@ def build(output_path, folder=None, geotiff=None,
             col_list.append((type_code, sorted_vals))
             field_list.append({'type': type_code, 'offset': 0, 'name': name})
 
+        # Add data_bounds to metadata
+        if coords is not None:
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            metadata = _ensure_metadata(metadata, {
+                "data_bounds": {"west": min(xs), "south": min(ys), "east": max(xs), "north": max(ys)}
+            })
+
         write_qbt_columnar(output_path, bitmask_bytes, col_list, leaf_count,
                           zoom=zoom, crs=crs,
                           origin_x=origin_x, origin_y=origin_y,
@@ -1412,7 +1644,9 @@ def build(output_path, folder=None, geotiff=None,
 
         # values를 bytes로 변환
         if isinstance(values, (bytes, bytearray)):
-            values_bytes = values
+            # Raw bytes: reorder by entry_size chunks according to sorted_indices
+            es = entry_size or (len(values) // len(quadkeys))
+            values_bytes = b''.join(values[i*es:(i+1)*es] for i in sorted_indices)
         else:
             # list of numbers → pack as bytes
             if fields and len(fields) == 1:
@@ -1421,6 +1655,14 @@ def build(output_path, folder=None, geotiff=None,
                 fmt = '<f'  # default float32
             sorted_vals = [values[i] for i in sorted_indices]
             values_bytes = b''.join(struct.pack(fmt, v) for v in sorted_vals)
+
+        # Add data_bounds to metadata
+        if coords is not None:
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            metadata = _ensure_metadata(metadata, {
+                "data_bounds": {"west": min(xs), "south": min(ys), "east": max(xs), "north": max(ys)}
+            })
 
         write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
                        zoom=zoom, crs=crs,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { type BBox } from '../../lib/geo-constants';
+import { type BBox, type GridParams } from '../../lib/geo-constants';
 import {
   openQBT,
   type QBT,
@@ -13,15 +13,19 @@ import {
   splitAntimeridian,
 } from 'qbtiles';
 
-// Re-export grid params for COG comparison
-export const WORLD_POP_GRID = {
-  zoom: 16,
-  originLon: -180,
-  originLat: 84,
-  pixelDeg: 360 / 43200,
-  rasterCols: 43200,
-  rasterRows: 17280,
-};
+/** Derive grid params from QBT header (no more hardcoding). */
+function gridFromHeader(qbt: QBT): GridParams {
+  const h = qbt.header;
+  const pixelDeg = h.extentX / (1 << h.zoom);
+  return {
+    zoom: h.zoom,
+    originLon: h.originX,
+    originLat: h.originY,
+    pixelDeg,
+    rasterCols: Math.round(h.extentX / pixelDeg),
+    rasterRows: Math.round(h.extentY / pixelDeg),
+  };
+}
 
 export interface QBTStats {
   requests: number;
@@ -57,6 +61,7 @@ export function useQBTilesQuery(qbtUrl: string) {
   });
 
   const qbtRef = useRef<QBT | null>(null);
+  const gridRef = useRef<GridParams | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -75,6 +80,7 @@ export function useQBTilesQuery(qbtUrl: string) {
           setState((s) => ({ ...s, indexProgress: msg })),
         );
         qbtRef.current = qbt;
+        gridRef.current = gridFromHeader(qbt);
         setState((s) => ({
           ...s,
           indexLoading: false,
@@ -94,7 +100,8 @@ export function useQBTilesQuery(qbtUrl: string) {
   const query = useCallback(
     async (bbox: BBox, onProgress?: (p: { request: number; bytes: number }) => void): Promise<{ bytes: number } | undefined> => {
       const qbt = qbtRef.current;
-      if (!qbt) return undefined;
+      const grid = gridRef.current;
+      if (!qbt || !grid) return undefined;
 
       // Access internal index and grid for low-level query (demo needs chunks for visualization)
       const index = (qbt as any)._bitmaskIndex;
@@ -121,7 +128,7 @@ export function useQBTilesQuery(qbtUrl: string) {
         let allRows: number[] = [];
         let allCols: number[] = [];
         for (const b of bboxes) {
-          const r = queryBbox(index, b, WORLD_POP_GRID);
+          const r = queryBbox(index, b, grid);
           allLeafIndices = allLeafIndices.concat(r.leafIndices);
           allRows = allRows.concat(r.rows);
           allCols = allCols.concat(r.cols);
@@ -144,8 +151,8 @@ export function useQBTilesQuery(qbtUrl: string) {
         const { values, totalBytes, requestCount, estimatedBytes, estimatedRequests, cachedCells } =
           await fetchRanges(qbtUrl, ranges, ac.signal, onProgress, header.valuesOffset);
 
-        const cells = queryResultToCells(result, values, ranges, WORLD_POP_GRID);
-        const chunks = queryResultToChunks(result, ranges, WORLD_POP_GRID);
+        const cells = queryResultToCells(result, values, ranges, grid);
+        const chunks = queryResultToChunks(result, ranges, grid);
         const elapsed = performance.now() - t0;
 
         setState((s) => ({

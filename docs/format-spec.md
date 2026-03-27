@@ -272,6 +272,17 @@ Optional JSON at `metadata_offset`. Contains auxiliary information:
 
 If `metadata_offset = 0`, no metadata is present.
 
+### Reserved Fields
+
+The following metadata fields have defined semantics. Parsers should recognize them when present:
+
+| Field | Type | Description |
+|---|---|---|
+| `data_bounds` | `{west, south, east, north}` | Actual data extent in WGS84 (or native CRS). The header's `origin/extent` defines the quadtree grid, which may be larger than the data. `data_bounds` gives the tight bounding box of cells that contain data. |
+| `vector_layers` | `[{id, minzoom?, maxzoom?}, ...]` | MVT source-layer names (variable-entry mode, TileJSON compatible). Enables clients to register MapLibre layers without parsing tiles. |
+
+`build()` automatically records `data_bounds` for all modes and `vector_layers` for MVT/PBF tile archives.
+
 ## 7. Coordinate System
 
 ### Standard CRS (crs > 0)

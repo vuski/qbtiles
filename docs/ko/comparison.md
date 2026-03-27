@@ -16,7 +16,7 @@
 - 타일 분포가 희소할수록 → delta가 커지고 → 바이트 소비 증가
 - 빈 타일은 간격을 숫자로 인코딩하여 "건너뜀"
 
-### QBTiles 파일 구조 (v0.5.0)
+### QBTiles 파일 구조
 
 ```
 [128B+ header: magic, version, flags, zoom, CRS, origin, extent,
