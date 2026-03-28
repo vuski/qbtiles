@@ -829,6 +829,211 @@ def serialize_bitmask(root):
     return bytes(bitmask_bytes), leaf_count
 
 
+def serialize_bitmask_from_quadkeys(quadkeys_arr, zoom):
+    """정렬된 quadkey int64 배열에서 bitmask를 직접 생성.
+
+    build_quadtree + serialize_bitmask를 NumPy 연산으로 대체.
+    출력은 serialize_bitmask()와 바이트 단위로 동일.
+
+    Args:
+        quadkeys_arr: numpy int64 배열 (정렬 필수)
+        zoom: quadtree 줌 레벨
+
+    Returns:
+        (bitmask_bytes, leaf_count, sort_indices):
+        - bitmask_bytes: 팩킹된 비트마스크
+        - leaf_count: 리프 수
+        - sort_indices: 원본 배열을 정렬한 인덱스 (values 재정렬용)
+    """
+    import numpy as np
+
+    # quadkey int64에서 0b11 prefix 제거 → 순수 2*zoom 비트
+    # quadkey = 0b11 [z0_rb z0_cb] [z1_rb z1_cb] ... [zN_rb zN_cb]
+    # 총 bit_length = 2 + 2*zoom
+    sort_indices = np.argsort(quadkeys_arr, kind='mergesort')
+    sorted_qk = quadkeys_arr[sort_indices]
+
+    # 각 레벨에서의 "부모 노드 ID" = quadkey를 상위 2*(z+1) 비트만 취한 것
+    # 레벨 z의 노드 ID = quadkey >> (2 * (zoom - z))  (0b11 prefix 포함)
+    # BFS 순서는 레벨별로 unique 노드를 정렬된 순서로 나열한 것
+
+    bitmask_list = []
+
+    for z in range(zoom):
+        # 이 레벨의 노드 ID (prefix 포함)
+        shift = 2 * (zoom - z)
+        node_ids = sorted_qk >> shift  # 부모 노드 ID
+
+        # unique 노드 (정렬 유지)
+        unique_nodes = np.unique(node_ids)
+
+        # 각 노드의 자식 2비트 = 하위 shift 비트 중 상위 2비트
+        # = (quadkey >> (shift - 2)) & 0b11
+        child_shift = shift - 2
+        child_ids_full = (sorted_qk >> child_shift) & 3  # 0~3
+
+        # 각 unique 노드별 존재하는 자식 비트 계산
+        # node_ids와 unique_nodes를 매칭
+        # np.searchsorted로 각 quadkey가 어느 unique 노드에 속하는지 찾기
+        node_idx = np.searchsorted(unique_nodes, node_ids)
+
+        # (node_idx, child_id) 쌍의 unique 조합으로 nibble 계산
+        # 각 노드별로 존재하는 child bit를 OR
+        n_unique = len(unique_nodes)
+        nibbles = np.zeros(n_unique, dtype=np.uint8)
+
+        # child_id → bit: 0→8, 1→4, 2→2, 3→1
+        child_bits = np.array([8, 4, 2, 1], dtype=np.uint8)
+        bits = child_bits[child_ids_full]
+
+        # node_idx별로 bits를 OR 집계
+        # np.bitwise_or.at 사용
+        np.bitwise_or.at(nibbles, node_idx, bits)
+
+        bitmask_list.append(nibbles)
+
+    # 패킹
+    all_nibbles = np.concatenate(bitmask_list)
+    n_nib = len(all_nibbles)
+    if n_nib % 2 != 0:
+        all_nibbles = np.append(all_nibbles, np.uint8(0))
+    packed = (all_nibbles[0::2] << 4) | all_nibbles[1::2]
+    bitmask_bytes = bytes(packed.astype(np.uint8))
+
+    leaf_count = len(sorted_qk)
+    return bitmask_bytes, leaf_count, sort_indices
+
+
+def _bitmask_from_2d_mask(mask_2d, raster_rows, raster_cols, grid_rows, grid_cols,
+                          offset_row=0, offset_col=0, flip_y=False):
+    """2D boolean mask에서 직접 bitmask + Z-order 인덱스를 생성.
+
+    GeoTIFF 전용 최적화: quadkey 변환, 트리 구축, 정렬 없이
+    2D mask를 2×2씩 접어서 quadtree bitmask를 바로 생성한다.
+    BFS 순회도 레벨별 NumPy 배열로 벡터화.
+
+    Args:
+        mask_2d: (raster_rows, raster_cols) boolean ndarray — 유효 셀
+        raster_rows, raster_cols: 원본 래스터 크기
+        grid_rows, grid_cols: 2^zoom 크기의 그리드 (padding 포함)
+        offset_row, offset_col: 래스터가 그리드 내에서 시작하는 위치
+        flip_y: True이면 Y축 반전 (Custom CRS, SW origin)
+
+    Returns:
+        (bitmask_bytes, leaf_count, z_order_rows, z_order_cols):
+        - bitmask_bytes: serialize_bitmask()와 동일한 포맷
+        - leaf_count: 유효 셀 수
+        - z_order_rows, z_order_cols: Z-order 순서의 래스터 좌표 (numpy arrays)
+    """
+    import numpy as np
+
+    # 그리드 크기의 boolean 배열 생성 (padding with False)
+    grid = np.zeros((grid_rows, grid_cols), dtype=bool)
+    if flip_y:
+        flipped = mask_2d[::-1]
+        grid[offset_row:offset_row + raster_rows, offset_col:offset_col + raster_cols] = flipped
+    else:
+        grid[offset_row:offset_row + raster_rows, offset_col:offset_col + raster_cols] = mask_2d
+
+    # 정사각형으로 확장 (quadtree는 정사각형)
+    max_dim = max(grid_rows, grid_cols)
+    if grid_rows != grid_cols:
+        sq_grid = np.zeros((max_dim, max_dim), dtype=bool)
+        sq_grid[:grid_rows, :grid_cols] = grid
+        grid = sq_grid
+
+    size = max_dim
+    zoom = 0
+    s = size
+    while s > 1:
+        zoom += 1
+        s >>= 1
+
+    # Bottom-up: 각 레벨의 존재 마스크 생성
+    level_masks = [None] * (zoom + 1)
+    level_masks[zoom] = grid
+    for z in range(zoom - 1, -1, -1):
+        prev = level_masks[z + 1]
+        level_masks[z] = (prev[0::2, 0::2] | prev[0::2, 1::2] |
+                          prev[1::2, 0::2] | prev[1::2, 1::2])
+
+    # Top-down BFS: 레벨별 NumPy 벡터 연산
+    # 각 레벨에서 존재하는 노드의 (row, col) 배열을 유지
+    # Z-order: child 0=TL(0,0), 1=TR(0,1), 2=BL(1,0), 3=BR(1,1)
+    bitmask_list = []
+
+    # 루트 노드
+    current_rows = np.array([0], dtype=np.int32)
+    current_cols = np.array([0], dtype=np.int32)
+
+    for z in range(zoom):
+        child_mask = level_masks[z + 1]
+        n = len(current_rows)
+
+        # 각 노드의 4개 자식 좌표 (n×4)
+        parent_r2 = current_rows * 2  # (n,)
+        parent_c2 = current_cols * 2  # (n,)
+
+        # child rows: TL=r*2, TR=r*2, BL=r*2+1, BR=r*2+1
+        # child cols: TL=c*2, TR=c*2+1, BL=c*2, BR=c*2+1
+        cr = np.empty((n, 4), dtype=np.int32)
+        cc = np.empty((n, 4), dtype=np.int32)
+        cr[:, 0] = parent_r2;     cc[:, 0] = parent_c2      # TL
+        cr[:, 1] = parent_r2;     cc[:, 1] = parent_c2 + 1  # TR
+        cr[:, 2] = parent_r2 + 1; cc[:, 2] = parent_c2      # BL
+        cr[:, 3] = parent_r2 + 1; cc[:, 3] = parent_c2 + 1  # BR
+
+        # 범위 체크 + 존재 여부
+        h, w = child_mask.shape
+        in_bounds = (cr >= 0) & (cr < h) & (cc >= 0) & (cc < w)  # (n, 4)
+        exists = np.zeros((n, 4), dtype=bool)
+        valid = in_bounds
+        exists[valid] = child_mask[cr[valid], cc[valid]]
+
+        # nibble 계산: bit3=TL, bit2=TR, bit1=BL, bit0=BR
+        nibbles = (exists[:, 0].astype(np.uint8) * 8 +
+                   exists[:, 1].astype(np.uint8) * 4 +
+                   exists[:, 2].astype(np.uint8) * 2 +
+                   exists[:, 3].astype(np.uint8))
+        bitmask_list.append(nibbles)
+
+        # 다음 레벨: 존재하는 자식만 Z-order 순서로 수집
+        # exists (n, 4) → flat 인덱스로 존재하는 것만 추출
+        next_rows_list = []
+        next_cols_list = []
+        for i in range(4):
+            mask_i = exists[:, i]
+            next_rows_list.append(cr[mask_i, i])
+            next_cols_list.append(cc[mask_i, i])
+
+        # Z-order 유지: 각 노드의 자식을 순서대로 인터리브
+        # exists가 (n, 4)이므로, 노드별로 존재하는 자식을 순서대로 나열
+        # → (n, 4)에서 exists=True인 것을 row-major로 추출하면 Z-order 유지
+        next_mask = exists.ravel()  # (n*4,)
+        next_cr = cr.ravel()[next_mask]
+        next_cc = cc.ravel()[next_mask]
+        current_rows = next_cr
+        current_cols = next_cc
+
+    # current_rows, current_cols = 리프 노드들의 grid 좌표 (Z-order 순서)
+    # 래스터 좌표로 변환
+    z_order_rows = current_rows - offset_row
+    z_order_cols = current_cols - offset_col
+    if flip_y:
+        z_order_rows = raster_rows - 1 - z_order_rows
+
+    # bitmask 패킹
+    all_nibbles = np.concatenate(bitmask_list)
+    n_nib = len(all_nibbles)
+    if n_nib % 2 != 0:
+        all_nibbles = np.append(all_nibbles, np.uint8(0))
+    packed = (all_nibbles[0::2] << 4) | all_nibbles[1::2]
+    bitmask_bytes = bytes(packed.astype(np.uint8))
+
+    leaf_count = len(current_rows)
+    return bitmask_bytes, leaf_count, z_order_rows, z_order_cols
+
+
 def _encode_field_schema(fields):
     """Field schema를 바이트로 인코딩."""
     buf = bytearray()
@@ -924,6 +1129,9 @@ def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
         values_bytes: leaf_count × entry_size 바이트의 값 데이터.
         fields: [{'type': TYPE_FLOAT32, 'offset': 0, 'name': 'value'}, ...]
     """
+    import time as _time
+    _ts = _time.perf_counter()
+
     flags = 0x1  # bit0=1 (fixed), bit1=0 (row)
     metadata_bytes = metadata.encode('utf-8') if isinstance(metadata, str) else metadata
 
@@ -932,6 +1140,9 @@ def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
         crs, origin_x, origin_y, extent_x, extent_y,
         entry_size, fields, metadata_bytes,
         compress_bitmask=compress_bitmask)
+    print(f"  [write_qbt_fixed] header+gzip bitmask: {_time.perf_counter()-_ts:.3f}s, "
+          f"bitmask {len(bitmask_bytes):,}B → {len(stored_bitmask):,}B")
+    _ts = _time.perf_counter()
 
     with open(output_path, 'wb') as f:
         f.write(header_bytes)
@@ -939,6 +1150,8 @@ def write_qbt_fixed(output_path, bitmask_bytes, values_bytes,
         f.write(values_bytes)
         if metadata_bytes:
             f.write(metadata_bytes)
+    print(f"  [write_qbt_fixed] file I/O: {_time.perf_counter()-_ts:.3f}s, "
+          f"total {len(header_bytes)+len(stored_bitmask)+len(values_bytes):,}B")
 
 
 def write_qbt_columnar(output_path, bitmask_bytes, columns, leaf_count,
@@ -1212,6 +1425,15 @@ def build(output_path, folder=None, geotiff=None,
     import math
 
     # GeoTIFF → extract coords, values, cell_size, crs automatically
+    import time as _time
+    _t0 = _time.perf_counter()
+    def _log(msg, since=None):
+        elapsed = _time.perf_counter() - _t0
+        extra = ""
+        if since is not None:
+            extra = f" (step: {_time.perf_counter() - since:.3f}s)"
+        print(f"[QBT build] {elapsed:7.3f}s{extra} — {msg}")
+
     if geotiff is not None:
         try:
             import rasterio
@@ -1221,6 +1443,8 @@ def build(output_path, folder=None, geotiff=None,
                 "rasterio and numpy are required for GeoTIFF conversion. "
                 "Install with: pip install rasterio numpy"
             )
+        _ts = _time.perf_counter()
+        _log(f"Opening GeoTIFF: {geotiff}")
         with rasterio.open(geotiff) as src:
             file_nodata = src.nodata
             transform = src.transform
@@ -1240,12 +1464,18 @@ def build(output_path, folder=None, geotiff=None,
                         f"Please specify crs= manually."
                     )
 
+            _log(f"CRS detected: EPSG:{geotiff_crs}", _ts)
+            _ts = _time.perf_counter()
+
             # Read all bands
             band_count = src.count
             band_names = list(src.descriptions) if any(src.descriptions) else None
             arrays = []
             for b in range(1, band_count + 1):
                 arrays.append(src.read(b))
+
+            _log(f"Read {band_count} band(s), shape={arrays[0].shape}, dtype={arrays[0].dtype}", _ts)
+            _ts = _time.perf_counter()
 
             # Find valid (non-nodata) cells
             # User-specified nodata overrides file's nodata
@@ -1257,6 +1487,9 @@ def build(output_path, folder=None, geotiff=None,
 
             rows, cols_arr = np.where(mask)
             n_valid = len(rows)
+
+            _log(f"Valid cells: {n_valid:,} / {arrays[0].size:,} ({n_valid/arrays[0].size*100:.1f}%)", _ts)
+            _ts = _time.perf_counter()
 
             if n_valid == 0:
                 raise ValueError(f"No valid cells found in {geotiff}")
@@ -1275,7 +1508,13 @@ def build(output_path, folder=None, geotiff=None,
                 stacklevel=2,
             )
 
+            _log(f"Computed cell centers", _ts)
+            _ts = _time.perf_counter()
+
             coords = list(zip(xs.tolist(), ys.tolist()))
+            _log(f"Coords list built: {len(coords):,} entries", _ts)
+            _ts = _time.perf_counter()
+
             crs = geotiff_crs or crs
 
             if cell_size is None:
@@ -1322,6 +1561,9 @@ def build(output_path, folder=None, geotiff=None,
                 extent_x = auto_extent
                 extent_y = auto_extent
 
+            _log(f"Origin/extent: origin=({origin_x},{origin_y}), extent=({extent_x},{extent_y})", _ts)
+            _ts = _time.perf_counter()
+
             _NUMPY_TO_QBT = {
                 np.dtype('uint8'): TYPE_UINT8,
                 np.dtype('int16'): TYPE_INT16,
@@ -1350,6 +1592,7 @@ def build(output_path, folder=None, geotiff=None,
                 values = None
                 fields = []
                 entry_size = 0
+                _log(f"Bitmask-only mode", _ts)
             elif band_count == 1:
                 # Single band → fixed row mode
                 values = arrays[0][rows, cols_arr].tolist()
@@ -1357,6 +1600,7 @@ def build(output_path, folder=None, geotiff=None,
                     name = (band_names[0] if band_names and band_names[0] else 'value')
                     fields = [{'type': type_code, 'name': name}]
                     entry_size = type_size
+                _log(f"Single band values extracted: {len(values):,} cells, type={dtype}", _ts)
             else:
                 # Multiple bands → fixed row mode (interleaved)
                 # Each entry = [band1, band2, ...] concatenated
@@ -1376,6 +1620,84 @@ def build(output_path, folder=None, geotiff=None,
                     for b in range(band_count):
                         values_bytes_io.write(struct.pack(fmt, band_vals[b][i]))
                 values = values_bytes_io.getvalue()  # raw bytes, not list
+                _log(f"Multi-band interleaved: {band_count} bands × {n_valid:,} cells = {len(values):,} bytes", _ts)
+
+            # ── GeoTIFF fast path: 2D mask → bitmask 직접 생성 ──
+            import json as _json
+            def _ensure_metadata_local(metadata, extra):
+                if metadata is None:
+                    meta = {}
+                elif isinstance(metadata, str):
+                    meta = _json.loads(metadata)
+                else:
+                    meta = dict(metadata)
+                meta.update(extra)
+                return _json.dumps(meta)
+
+            _ts = _time.perf_counter()
+
+            # cell_size → zoom
+            if cell_size is not None and zoom is None:
+                zoom = round(math.log2(max(extent_x, extent_y) / cell_size))
+
+            grid_cols_x = int(extent_x / cell_size)
+            grid_rows_y = int(extent_y / cell_size)
+            # raster가 grid 내에서 어디에 위치하는지 계산
+            if crs == 4326 or crs == 3857:
+                offset_col = round((bounds.left - origin_x) / cell_size)
+                offset_row = round((origin_y - bounds.top) / cell_size)
+                flip_y = False
+            else:
+                offset_col = round((bounds.left - origin_x) / cell_size)
+                offset_row = round((bounds.bottom - origin_y) / cell_size)
+                flip_y = True
+
+            _log(f"Grid: {grid_cols_x}×{grid_rows_y}, offset=({offset_row},{offset_col}), flip_y={flip_y}")
+
+            bitmask_bytes_result, leaf_count, z_rows, z_cols = _bitmask_from_2d_mask(
+                mask, raster_rows=mask.shape[0], raster_cols=mask.shape[1],
+                grid_rows=grid_rows_y, grid_cols=grid_cols_x,
+                offset_row=offset_row, offset_col=offset_col, flip_y=flip_y,
+            )
+            _log(f"Bitmask from 2D mask: {len(bitmask_bytes_result):,} bytes, {leaf_count:,} leaves", _ts)
+            _ts = _time.perf_counter()
+
+            # Z-order 순서로 values 추출
+            if bitmask_only:
+                values_bytes = b''
+                entry_size = 0
+            elif band_count == 1:
+                values_arr = arrays[0][z_rows, z_cols]
+                values_bytes = values_arr.tobytes()
+            else:
+                # Multi-band interleaved
+                interleaved = np.empty((leaf_count, band_count), dtype=arrays[0].dtype)
+                for b in range(band_count):
+                    interleaved[:, b] = arrays[b][z_rows, z_cols]
+                values_bytes = interleaved.tobytes()
+
+            _log(f"Values in Z-order: {len(values_bytes):,} bytes", _ts)
+            _ts = _time.perf_counter()
+
+            # data_bounds metadata
+            metadata = _ensure_metadata_local(metadata, {
+                "data_bounds": {
+                    "west": float(bounds.left),
+                    "south": float(bounds.bottom),
+                    "east": float(bounds.right),
+                    "north": float(bounds.top),
+                }
+            })
+
+            write_qbt_fixed(output_path, bitmask_bytes_result, values_bytes,
+                           zoom=zoom, crs=crs,
+                           origin_x=origin_x, origin_y=origin_y,
+                           extent_x=extent_x, extent_y=extent_y,
+                           entry_size=entry_size, fields=fields,
+                           metadata=metadata, compress_bitmask=compress_bitmask)
+            _log(f"File written: {output_path}", _ts)
+            _log(f"TOTAL BUILD TIME", None)
+            return
 
     # Auto-calculate origin/extent from coords + cell_size (custom CRS only)
     if coords is not None and cell_size is not None and crs != 4326:
@@ -1433,9 +1755,13 @@ def build(output_path, folder=None, geotiff=None,
 
     if folder is not None:
         # Variable-entry: 타일 아카이브
+        _log(f"Indexing tile folder: {folder}")
         tile_entries = index_tile_folder(folder, ext)
         if not tile_entries:
             raise ValueError(f"No tiles found in {folder}")
+        _log(f"Found {len(tile_entries):,} tiles", _ts)
+        _ts = _time.perf_counter()
+
         root = build_quadtree(tile_entries)
         # quadkey_int64 = 0b11 prefix + 2 bits per zoom level
         # bit_length = 2 + 2*zoom → zoom = (bit_length - 2) / 2 = bit_length/2 - 1
@@ -1467,14 +1793,20 @@ def build(output_path, folder=None, geotiff=None,
         if meta_extra:
             metadata = _ensure_metadata(metadata, meta_extra)
 
+        _log(f"Quadtree built, zoom={max_zoom}", _ts)
+        _ts = _time.perf_counter()
+
         write_qbt_variable(output_path, root, tile_entries=tile_entries,
                           zoom=max_zoom, crs=crs,
                           origin_x=origin_x, origin_y=origin_y,
                           extent_x=extent_x, extent_y=extent_y,
                           metadata=metadata)
+        _log(f"File written: {output_path}", _ts)
+        _log(f"TOTAL BUILD TIME", None)
         return tile_entries
 
     # coords → quadkeys 변환
+    _ts = _time.perf_counter()
     if coords is not None and quadkeys is None:
         if zoom is None:
             raise ValueError("zoom is required when using coords")
@@ -1492,18 +1824,32 @@ def build(output_path, folder=None, geotiff=None,
                 stacklevel=2,
             )
 
-            def _wgs84_to_quadkey(lon, lat):
-                col = int((lon - origin_x) / pixel_deg)
-                row = int((origin_y - lat) / pixel_deg)
-                # row/col → quadkey with 0b11 prefix
-                qk = 3
-                for i in reversed(range(zoom)):
-                    rb = (row >> i) & 1
-                    cb = (col >> i) & 1
-                    qk = (qk << 2) | (rb << 1) | cb
-                return qk
+            # def _wgs84_to_quadkey(lon, lat):
+            #     col = int((lon - origin_x) / pixel_deg)
+            #     row = int((origin_y - lat) / pixel_deg)
+            #     # row/col → quadkey with 0b11 prefix
+            #     qk = 3
+            #     for i in reversed(range(zoom)):
+            #         rb = (row >> i) & 1
+            #         cb = (col >> i) & 1
+            #         qk = (qk << 2) | (rb << 1) | cb
+            #     return qk
+            # quadkeys = [_wgs84_to_quadkey(x, y) for x, y in coords]
 
-            quadkeys = [_wgs84_to_quadkey(x, y) for x, y in coords]
+            # NumPy vectorized quadkey encoding
+            import numpy as np
+            lons = np.array([c[0] for c in coords], dtype=np.float64)
+            lats = np.array([c[1] for c in coords], dtype=np.float64)
+            col_arr = ((lons - origin_x) / pixel_deg).astype(np.int64)
+            row_arr = ((origin_y - lats) / pixel_deg).astype(np.int64)
+            qk_arr = np.full(len(coords), 3, dtype=np.int64)
+            for i in reversed(range(zoom)):
+                rb = (row_arr >> i) & 1
+                cb = (col_arr >> i) & 1
+                qk_arr = (qk_arr << 2) | (rb << 1) | cb
+            quadkeys = qk_arr.tolist()
+            _log(f"WGS84 → quadkeys: {len(quadkeys):,} keys", _ts)
+            _ts = _time.perf_counter()
         else:
             # Custom CRS: origin is SW corner, Y goes up
             extent = extent_x  # square grid assumed
@@ -1516,6 +1862,8 @@ def build(output_path, folder=None, geotiff=None,
             )
             quadkeys = [encode_custom_quadkey(x, y, zoom, origin_x, origin_y, extent)
                         for x, y in coords]
+            _log(f"Custom CRS → quadkeys: {len(quadkeys):,} keys", _ts)
+            _ts = _time.perf_counter()
 
     if quadkeys is None:
         raise ValueError("One of folder, coords, or quadkeys is required")
@@ -1603,19 +1951,19 @@ def build(output_path, folder=None, geotiff=None,
         if zoom is None:
             raise ValueError("zoom is required for columnar mode")
 
-        # quadkey → quadtree
-        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
-        root = build_quadtree(quadkey_info)
-        bitmask_bytes, leaf_count = serialize_bitmask(root)
-
-        # 정렬: quadkey 순서로 values 정렬
-        sorted_indices = sorted(range(len(quadkeys)), key=lambda i: quadkeys[i])
+        # quadkey → bitmask (NumPy fast path)
+        import numpy as np
+        _log(f"Serializing bitmask from {len(quadkeys):,} quadkeys...")
+        qk_arr = np.array(quadkeys, dtype=np.int64)
+        bitmask_bytes, leaf_count, sort_indices = serialize_bitmask_from_quadkeys(qk_arr, zoom)
+        _log(f"Bitmask serialized: {len(bitmask_bytes):,} bytes, {leaf_count:,} leaves", _ts)
+        _ts = _time.perf_counter()
 
         # 타입 자동 추론 + 컬럼 구축
         col_list = []
         field_list = []
         for name, vals in columns.items():
-            sorted_vals = [vals[i] for i in sorted_indices]
+            sorted_vals = [vals[i] for i in sort_indices]
             if not all(isinstance(v, (int, float)) for v in vals):
                 raise ValueError(
                     f"Column '{name}' contains non-numeric values. "
@@ -1636,6 +1984,9 @@ def build(output_path, folder=None, geotiff=None,
                 "data_bounds": {"west": min(xs), "south": min(ys), "east": max(xs), "north": max(ys)}
             })
 
+        _log(f"Columnar data prepared: {len(col_list)} columns", _ts)
+        _ts = _time.perf_counter()
+
         write_qbt_columnar(output_path, bitmask_bytes, col_list, leaf_count,
                           zoom=zoom, crs=crs,
                           origin_x=origin_x, origin_y=origin_y,
@@ -1643,31 +1994,37 @@ def build(output_path, folder=None, geotiff=None,
                           fields=fields or field_list,
                           metadata=metadata, compress=compress,
                           compress_bitmask=compress_bitmask)
+        _log(f"File written: {output_path}", _ts)
+        _log(f"TOTAL BUILD TIME", None)
 
     elif values is not None and not bitmask_only:
         # Fixed row 모드
         if zoom is None:
             raise ValueError("zoom is required for fixed row mode")
 
-        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
-        root = build_quadtree(quadkey_info)
-        bitmask_bytes, leaf_count = serialize_bitmask(root)
+        # quadkey → bitmask (NumPy fast path)
+        import numpy as np
+        _log(f"Serializing bitmask from {len(quadkeys):,} quadkeys...")
+        qk_arr = np.array(quadkeys, dtype=np.int64)
+        bitmask_bytes, leaf_count, sort_indices = serialize_bitmask_from_quadkeys(qk_arr, zoom)
+        _log(f"Bitmask serialized: {len(bitmask_bytes):,} bytes, {leaf_count:,} leaves", _ts)
+        _ts = _time.perf_counter()
 
-        sorted_indices = sorted(range(len(quadkeys)), key=lambda i: quadkeys[i])
-
-        # values를 bytes로 변환
+        # values를 bytes로 변환 (sort_indices 순서로 재정렬)
         if isinstance(values, (bytes, bytearray)):
-            # Raw bytes: reorder by entry_size chunks according to sorted_indices
+            # Raw bytes: reorder by entry_size chunks according to sort_indices
             es = entry_size or (len(values) // len(quadkeys))
-            values_bytes = b''.join(values[i*es:(i+1)*es] for i in sorted_indices)
+            values_bytes = b''.join(values[sort_indices[i]*es:(sort_indices[i]+1)*es] for i in range(len(sort_indices)))
         else:
             # list of numbers → pack as bytes
             if fields and len(fields) == 1:
                 fmt = '<' + _TYPE_STRUCT.get(fields[0]['type'], 'f')
             else:
                 fmt = '<f'  # default float32
-            sorted_vals = [values[i] for i in sorted_indices]
+            sorted_vals = [values[sort_indices[i]] for i in range(len(sort_indices))]
             values_bytes = b''.join(struct.pack(fmt, v) for v in sorted_vals)
+        _log(f"Values packed: {len(values_bytes):,} bytes", _ts)
+        _ts = _time.perf_counter()
 
         # Add data_bounds to metadata
         if coords is not None:
@@ -1683,6 +2040,8 @@ def build(output_path, folder=None, geotiff=None,
                        extent_x=extent_x, extent_y=extent_y,
                        entry_size=entry_size, fields=fields,
                        metadata=metadata, compress_bitmask=compress_bitmask)
+        _log(f"File written: {output_path}", _ts)
+        _log(f"TOTAL BUILD TIME", None)
 
     elif bitmask_only:
         # Bitmask-only 모드: values 섹션 없이 bitmask만 저장
@@ -1700,9 +2059,9 @@ def build(output_path, folder=None, geotiff=None,
                     f"bitmask_only=True but values contain non-binary data: {bad}"
                 )
 
-        quadkey_info = [(qk, "", 0, 0, 1) for qk in quadkeys]
-        root = build_quadtree(quadkey_info)
-        bitmask_bytes, leaf_count = serialize_bitmask(root)
+        import numpy as np
+        qk_arr = np.array(quadkeys, dtype=np.int64)
+        bitmask_bytes, leaf_count, _ = serialize_bitmask_from_quadkeys(qk_arr, zoom)
 
         # Add data_bounds to metadata
         if coords is not None:

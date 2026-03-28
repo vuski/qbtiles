@@ -18,7 +18,7 @@ except ImportError:
     sys.exit(1)
 
 
-def test_geotiff(tif_path, nodata=None, bitmask_only=False):
+def test_geotiff(tif_path, nodata=None, bitmask_only=False, output=None):
     print(f"Input: {tif_path}")
     print(f"Size: {os.path.getsize(tif_path) / 1024 / 1024:.1f} MB")
 
@@ -41,8 +41,11 @@ def test_geotiff(tif_path, nodata=None, bitmask_only=False):
         print(f"Valid cells: {valid:,} / {data.size:,} ({valid/data.size*100:.1f}%)")
 
     # 2. Convert using build(geotiff=)
-    base = os.path.splitext(os.path.basename(tif_path))[0]
-    qbt_path = os.path.join(RESULTS, base + '.qbt')
+    if output:
+        qbt_path = output
+    else:
+        base = os.path.splitext(os.path.basename(tif_path))[0]
+        qbt_path = os.path.join(RESULTS, base + '.qbt')
     print(f"\nConverting to {qbt_path}...")
     t0 = time.time()
 
@@ -94,8 +97,8 @@ def test_geotiff(tif_path, nodata=None, bitmask_only=False):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python tests/test_geotiff.py <path_to_geotiff> [--nodata VALUE] [--bitmask-only]")
-        print("Example: python tests/test_geotiff.py worldpop.tif --nodata 0 --bitmask-only")
+        print("Usage: python tests/test_geotiff.py <path_to_geotiff> [-o output.qbt] [--nodata VALUE] [--bitmask-only]")
+        print("Example: python tests/test_geotiff.py worldpop.tif -o result_v2.qbt --nodata 0")
         sys.exit(1)
 
     nodata_val = None
@@ -107,4 +110,9 @@ if __name__ == '__main__':
 
     bitmask_flag = '--bitmask-only' in sys.argv
 
-    test_geotiff(sys.argv[1], nodata=nodata_val, bitmask_only=bitmask_flag)
+    output_path = None
+    if '-o' in sys.argv:
+        idx = sys.argv.index('-o')
+        output_path = sys.argv[idx + 1]
+
+    test_geotiff(sys.argv[1], nodata=nodata_val, bitmask_only=bitmask_flag, output=output_path)
